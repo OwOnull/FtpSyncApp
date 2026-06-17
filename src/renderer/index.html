@@ -1,0 +1,207 @@
+<!doctype html>
+
+<html lang="zh-CN" data-debug-log-layout="off">
+
+  <head>
+
+    <meta charset="UTF-8" />
+
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <title>项目实时 FTP 同步工具</title>
+
+    <link rel="stylesheet" href="./styles.css" />
+
+  </head>
+
+  <body>
+
+    <div class="app-shell">
+
+      <main class="main-area">
+
+        <div class="container">
+
+          <div class="main-layout">
+
+            <section class="card config-panel">
+
+              <div class="config-scroll">
+
+                <div class="row">
+
+                  <label>当前项目目录</label>
+
+                  <input id="projectPath" type="text" readonly />
+
+                  <button id="btnChooseProject">选择项目</button>
+
+                </div>
+
+
+
+                <div class="grid config-grid">
+
+                  <label>类型</label>
+
+                  <select id="type">
+
+                    <option value="ftp">ftp</option>
+
+                  </select>
+
+
+
+                  <label>主机</label>
+
+                  <input id="host" type="text" placeholder="例如：127.0.0.1" />
+
+
+
+                  <label>端口</label>
+
+                  <input id="port" type="number" value="21" />
+
+
+
+                  <label>用户名</label>
+
+                  <input id="username" type="text" />
+
+
+
+                  <label>密码</label>
+
+                  <input id="password" type="password" />
+
+
+
+                  <label>部署路径（远程基路径）</label>
+
+                  <input id="remoteBasePath" type="text" placeholder="例如：/www/project" />
+
+                </div>
+
+                <div class="tips">
+
+                  注意：配置将保存在本地 JSON 文件中，密码为明文保存，请注意本机安全。
+
+                </div>
+
+                <div class="actions">
+
+                  <button id="btnSaveConfig">保存配置</button>
+
+                  <button id="btnStartSync">开始同步</button>
+
+                  <button id="btnStopSync" class="danger">停止同步</button>
+
+                </div>
+
+              </div>
+
+            </section>
+
+
+
+            <section class="card panel local-panel">
+
+              <div class="panel-header">
+
+                <h3>本地目录</h3>
+
+                <div class="panel-actions">
+
+                  <button id="btnLocalUp" class="secondary">返回上级</button>
+
+                  <button id="btnRefreshLocal">刷新本地</button>
+
+                </div>
+
+              </div>
+
+              <div id="localPath" class="panel-path">-</div>
+
+              <div id="localError" class="panel-error hidden"></div>
+
+              <ul id="localList" class="dir-list"></ul>
+
+            </section>
+
+
+
+            <section class="card panel remote-panel">
+
+              <div class="panel-header">
+
+                <h3>远程目录</h3>
+
+                <div class="panel-actions">
+
+                  <button id="btnRemoteUp" class="secondary">返回上级</button>
+
+                  <button id="btnRefreshRemote">刷新远程</button>
+
+                </div>
+
+              </div>
+
+              <div id="remotePath" class="panel-path">-</div>
+
+              <div id="remoteError" class="panel-error hidden"></div>
+
+              <ul id="remoteList" class="dir-list"></ul>
+
+            </section>
+
+          </div>
+
+        </div>
+
+      </main>
+
+
+
+      <aside id="logDrawer" class="log-drawer" aria-hidden="true">
+        <button
+          id="btnToggleLogs"
+          type="button"
+          class="log-integrated-handle"
+          aria-expanded="false"
+          aria-controls="logDrawer"
+          title="展开日志"
+        >
+          <span class="log-integrated-handle-grip"></span>
+        </button>
+
+        <div class="log-drawer-body">
+
+          <div class="log-drawer-title">日志</div>
+
+          <div id="logs" class="logs"></div>
+
+        </div>
+
+      </aside>
+
+    </div>
+
+
+
+    <div id="contextMenu" class="context-menu hidden" role="menu">
+
+      <button type="button" data-action="sync-to-server" class="context-menu-item">同步到服务器</button>
+
+      <button type="button" data-action="sync-to-local" class="context-menu-item">同步到本地</button>
+
+    </div>
+
+
+
+    <script src="./renderer.js"></script>
+
+  </body>
+
+</html>
+
+

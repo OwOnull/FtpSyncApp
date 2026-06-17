@@ -1,0 +1,885 @@
+* {
+
+  box-sizing: border-box;
+
+}
+
+
+
+:root {
+
+  --log-drawer-height: 280px;
+  --log-handle-width: 124px;
+  --log-handle-height: 24px;
+  --log-handle-gap: 6px;
+  --log-handle-radius: 18px;
+  --log-drawer-top-radius: 12px;
+  --log-handle-shadow: 0px -6px 12px 0px rgba(15, 23, 42, 0.1);
+
+}
+
+
+
+html,
+
+body {
+
+  height: 100%;
+
+  margin: 0;
+
+  padding: 0;
+
+  overflow: hidden;
+
+  overflow-x: hidden;
+
+}
+
+
+
+body {
+
+  font-family: "Segoe UI", Arial, sans-serif;
+
+  background: #f3f5f7;
+
+  color: #1f2329;
+
+}
+
+
+
+.app-shell {
+
+  display: flex;
+
+  flex-direction: column;
+
+  height: 100vh;
+
+  min-height: 0;
+
+  min-width: 0;
+
+  overflow-x: hidden;
+
+}
+
+
+
+.main-area {
+
+  flex: 1;
+
+  min-height: 0;
+
+  min-width: 0;
+
+  overflow: hidden;
+
+  overflow-x: hidden;
+
+}
+
+
+
+.container {
+
+  width: min(1680px, 100%);
+
+  max-width: 100%;
+
+  height: 100%;
+
+  margin: 0 auto;
+
+  padding: 12px 12px 0;
+
+  min-width: 0;
+
+}
+
+
+
+.card {
+
+  background: #fff;
+
+  border-radius: 10px;
+
+  padding: 14px;
+
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+
+  min-width: 0;
+
+}
+
+
+
+.row {
+
+  display: grid;
+
+  grid-template-columns: 120px 1fr 120px;
+
+  gap: 10px;
+
+  align-items: center;
+
+}
+
+
+
+.grid {
+
+  display: grid;
+
+  grid-template-columns: 160px 1fr;
+
+  gap: 10px;
+
+  align-items: center;
+
+}
+
+
+
+.main-layout {
+
+  display: grid;
+
+  grid-template-columns: 1fr 1fr 1fr;
+
+  gap: 14px;
+
+  height: 100%;
+
+  min-height: 0;
+
+  min-width: 0;
+
+}
+
+
+
+.config-panel {
+
+  margin-bottom: 0;
+
+  height: 100%;
+
+  overflow: hidden;
+
+  min-width: 0;
+
+  padding: 10px 10px 30px 10px;
+
+}
+
+
+
+.config-scroll {
+
+  height: 100%;
+
+  overflow: auto;
+
+  padding-right: 4px;
+
+  min-width: 0;
+
+}
+
+
+
+.config-grid {
+
+  margin-top: 12px;
+
+}
+
+
+
+input,
+
+select,
+
+button {
+
+  width: 100%;
+
+  min-width: 0;
+
+  height: 34px;
+
+  border-radius: 6px;
+
+  border: 1px solid #d0d7de;
+
+  padding: 0 10px;
+
+  font-size: 14px;
+
+}
+
+
+
+button {
+
+  cursor: pointer;
+
+  background: #1677ff;
+
+  border: none;
+
+  color: #fff;
+
+}
+
+
+
+button:hover {
+
+  opacity: 0.92;
+
+}
+
+
+
+button.danger {
+
+  background: #d03050;
+
+}
+
+
+
+button.secondary {
+
+  background: #5b6470;
+
+}
+
+
+
+.actions {
+
+  margin-top: 12px;
+
+  display: flex;
+
+  flex-wrap: wrap;
+
+  gap: 10px;
+
+}
+
+
+
+.tips {
+
+  margin-top: 10px;
+
+  color: #8a4b00;
+
+  font-size: 13px;
+
+  overflow-wrap: anywhere;
+
+}
+
+
+
+/* 日志弹窗：handle 底贴 drawer 顶，body 上圆角；调试色见 data-debug-log-layout="on" */
+
+.log-drawer {
+
+  position: fixed;
+
+  left: 50%;
+
+  bottom: 0;
+
+  z-index: 900;
+
+  width: min(1680px, 100%);
+
+  max-width: 100%;
+
+  height: var(--log-drawer-height);
+  transform: translateX(-50%);
+
+  background: #ffffff;
+
+  border: none;
+
+  border-radius: var(--log-drawer-top-radius) var(--log-drawer-top-radius) 0 0;
+
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.1);
+
+  display: flex;
+
+  flex-direction: column;
+
+  transition: height 0.2s ease;
+  overflow: visible;
+
+}
+
+
+
+.log-drawer.open {
+  /* 保留 open 类仅用于状态标识。 */
+
+}
+
+
+
+.log-drawer.resizing {
+
+  transition: none;
+
+}
+
+
+
+.log-drawer-body {
+
+  position: relative;
+  z-index: 1;
+
+  flex: 1;
+
+  min-height: 0;
+
+  display: flex;
+
+  flex-direction: column;
+
+  margin-top: var(--log-handle-gap);
+  padding: 14px 14px 14px;
+  background: #ffffff;
+  border-radius: var(--log-drawer-top-radius) var(--log-drawer-top-radius) 0 0;
+  overflow: hidden;
+
+}
+
+
+
+.log-drawer-title {
+
+  flex-shrink: 0;
+
+  font-size: 15px;
+
+  font-weight: 600;
+
+  margin-bottom: 8px;
+
+}
+
+
+
+.logs {
+
+  flex: 1;
+
+  min-height: 0;
+
+  overflow: auto;
+
+  background: #f8fafc;
+  color: #1f2329;
+
+  border: none;
+
+  border-radius: 8px;
+
+  padding: 10px;
+
+  font-family: Consolas, "Courier New", monospace;
+
+  font-size: 13px;
+
+  line-height: 1.5;
+
+  white-space: pre-wrap;
+
+  overflow-wrap: anywhere;
+
+}
+
+
+
+.log-integrated-handle {
+
+  position: absolute;
+
+  left: 50%;
+
+  top: calc(var(--log-handle-height) * -1);
+
+  z-index: 901;
+
+  width: var(--log-handle-width);
+
+  height: var(--log-handle-height);
+  margin: 0;
+  padding: 0;
+
+  border-radius: var(--log-handle-radius) var(--log-handle-radius) 0 0;
+
+  border: none;
+
+  box-shadow: var(--log-handle-shadow);
+
+  transform: translateX(-50%);
+
+  background: #ffffff;
+
+  color: #1f2329;
+
+  display: inline-grid;
+  align-content: center;
+
+  justify-content: center;
+
+  gap: 2px;
+
+  user-select: none;
+
+  touch-action: none;
+  cursor: ns-resize;
+
+  transition: background-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
+
+}
+
+.log-integrated-handle-grip {
+  position: relative;
+  z-index: 1;
+  width: 48px;
+  height: 4px;
+  border-radius: 999px;
+  background: #c5ced8;
+  justify-self: center;
+}
+
+.log-integrated-handle.open {
+  color: #1f2329;
+
+}
+
+
+
+.log-integrated-handle:hover,
+.log-drawer.resizing .log-integrated-handle {
+  background: #f8fafc;
+}
+
+.log-integrated-handle:hover .log-integrated-handle-grip,
+.log-drawer.resizing .log-integrated-handle-grip {
+  background: #1677ff;
+
+}
+
+/* data-debug-log-layout="on"：高对比调试色，见 README「日志弹窗布局调试」 */
+html[data-debug-log-layout="on"] .log-drawer {
+  background: #ffe8cc;
+}
+
+html[data-debug-log-layout="on"] .log-drawer-body {
+  background: #fff4e6;
+}
+
+html[data-debug-log-layout="on"] .logs {
+  background: #95de64;
+}
+
+html[data-debug-log-layout="on"] .log-integrated-handle {
+  background: #69c0ff;
+}
+
+html[data-debug-log-layout="on"] .log-integrated-handle:hover,
+html[data-debug-log-layout="on"] .log-drawer.resizing .log-integrated-handle {
+  background: #ffffff;
+}
+
+/* data-debug-log-layout="outline"：为各层加虚线描边，便于 DevTools 外肉眼对齐 */
+html[data-debug-log-layout="outline"] .log-integrated-handle {
+  outline: 2px dashed #f5222d;
+}
+
+html[data-debug-log-layout="outline"] .log-drawer-body {
+  outline: 1px dashed #fa8c16;
+}
+
+html[data-debug-log-layout="outline"] .logs {
+  outline: 2px dashed #389e0d;
+}
+
+
+
+.panel {
+
+  border: 1px solid #e3e8ef;
+
+  border-radius: 8px;
+
+  padding: 10px;
+
+  min-height: 0;
+
+  margin-bottom: 0;
+
+  display: flex;
+
+  flex-direction: column;
+
+  overflow: hidden;
+
+  min-width: 0;
+
+}
+
+
+
+.panel-header {
+
+  display: flex;
+
+  align-items: center;
+
+  justify-content: space-between;
+
+  gap: 8px;
+
+}
+
+
+
+.panel-header h3 {
+
+  margin: 0;
+
+  font-size: 16px;
+
+}
+
+
+
+.panel-actions {
+
+  display: flex;
+
+  flex-wrap: wrap;
+
+  gap: 8px;
+
+  min-width: 0;
+
+}
+
+
+
+.panel-actions button {
+
+  width: auto;
+
+  height: 30px;
+
+}
+
+
+
+.panel-path {
+
+  margin-top: 8px;
+
+  font-size: 12px;
+
+  color: #5b6470;
+
+  overflow-wrap: anywhere;
+
+  min-width: 0;
+
+}
+
+
+
+.panel-error {
+
+  margin-top: 6px;
+
+  min-height: 18px;
+
+  color: #d03050;
+
+  font-size: 12px;
+
+}
+
+
+
+.panel-error.hidden {
+
+  display: none;
+
+}
+
+
+
+.local-panel {
+
+  padding: 10px 10px 30px 10px;
+
+}
+
+
+
+.remote-panel {
+
+  padding: 10px 10px 30px 10px;
+
+}
+
+
+
+.dir-list {
+
+  margin: 8px 0 0;
+
+  padding: 0;
+
+  list-style: none;
+
+  flex: 1;
+
+  min-height: 0;
+
+  overflow: auto;
+
+  border: 1px solid #e3e8ef;
+
+  border-radius: 6px;
+
+  min-width: 0;
+
+}
+
+
+
+.dir-item {
+
+  display: flex;
+
+  justify-content: space-between;
+
+  gap: 10px;
+
+  padding: 8px 10px;
+
+  border-bottom: 1px solid #f1f3f6;
+
+  font-size: 13px;
+
+  user-select: none;
+
+}
+
+
+
+.dir-item.dir-entry {
+
+  cursor: pointer;
+
+}
+
+
+
+.dir-item.dir-entry:hover {
+
+  background: #f5f8ff;
+
+}
+
+
+
+.dir-item.selected {
+
+  background: #eef3ff;
+
+}
+
+
+
+.dir-item:last-child {
+
+  border-bottom: none;
+
+}
+
+
+
+.dir-item .name {
+
+  overflow: hidden;
+
+  text-overflow: ellipsis;
+
+  white-space: nowrap;
+
+}
+
+
+
+.dir-item .type {
+
+  color: #5b6470;
+
+  flex-shrink: 0;
+
+}
+
+
+
+.context-menu {
+
+  position: fixed;
+
+  z-index: 1000;
+
+  min-width: 160px;
+
+  background: #fff;
+
+  border: 1px solid #d0d7de;
+
+  border-radius: 8px;
+
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
+
+  padding: 6px;
+
+}
+
+
+
+.context-menu.hidden {
+
+  display: none;
+
+}
+
+
+
+.context-menu-item {
+
+  display: block;
+
+  width: 100%;
+
+  height: 34px;
+
+  padding: 0 12px;
+
+  border: none;
+
+  border-radius: 6px;
+
+  background: transparent;
+
+  color: #1f2329;
+
+  text-align: left;
+
+  font-size: 13px;
+
+}
+
+
+
+.context-menu-item:hover {
+
+  background: #eef3ff;
+
+  color: #1f4ea3;
+
+  opacity: 1;
+
+}
+
+
+
+.context-menu-item.hidden {
+
+  display: none;
+
+}
+
+
+
+body.log-drawer-dragging {
+
+  cursor: ns-resize;
+
+  user-select: none;
+
+}
+
+
+
+@media (max-width: 900px) {
+
+  .main-area {
+
+    overflow-x: hidden;
+
+    overflow-y: auto;
+
+  }
+
+
+
+  .container {
+
+    height: auto;
+
+    padding: 10px 10px 0;
+
+  }
+
+
+
+  .main-layout {
+
+    grid-template-columns: 1fr;
+
+    height: auto;
+
+  }
+
+
+
+  .config-panel {
+
+    height: auto;
+
+  }
+
+
+
+  .config-scroll {
+
+    height: auto;
+
+    max-height: 70vh;
+
+  }
+
+}
+
+

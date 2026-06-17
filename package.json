@@ -1,0 +1,22 @@
+{
+  "name": "ftp-sync-app",
+  "version": "1.0.0",
+  "description": "项目实时 FTP 同步工具（Electron）",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "keywords": [
+    "electron",
+    "ftp",
+    "sync",
+    "chokidar"
+  ],
+  "author": "local",
+  "license": "MIT",
+  "dependencies": {
+    "basic-ftp": "^5.0.5",
+    "chokidar": "^4.0.3",
+    "electron": "^31.7.7"
+  }
+}

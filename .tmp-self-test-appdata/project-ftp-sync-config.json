@@ -1,0 +1,21 @@
+{
+  "lastProjectPath": "D:\\Program\\Utility\\FtpSyncApp\\.tmp-self-test-project",
+  "projects": {
+    "D:\\FtpSyncApp\\.tmp-self-test-project": {
+      "type": "ftp",
+      "host": "127.0.0.1",
+      "port": 21,
+      "username": "demo",
+      "password": "demo",
+      "remoteBasePath": "/self-test"
+    },
+    "D:\\Program\\Utility\\FtpSyncApp\\.tmp-self-test-project": {
+      "type": "ftp",
+      "host": "127.0.0.1",
+      "port": 21,
+      "username": "demo",
+      "password": "demo",
+      "remoteBasePath": "/self-test"
+    }
+  }
+}
