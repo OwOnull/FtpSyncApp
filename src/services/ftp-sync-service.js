@@ -13,50 +13,301 @@ const DEFAULT_IGNORES = [
   "**/build/**",
 ];
 
+const DEFAULT_IGNORE_SEGMENTS = [
+  ".git",
+  "node_modules",
+  "runtime",
+  ".idea",
+  ".vscode",
+  "dist",
+  "build",
+];
+
+const DEFAULT_CONNECT_RETRY_OPTIONS = {
+  maxRetries: 5,
+  initialDelayMs: 500,
+  maxDelayMs: 4000,
+};
+
+function parseIgnorePaths(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item).trim()).filter(Boolean);
+  }
+  if (typeof value === "string") {
+    return value
+      .split(/\r?\n/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+function globMatch(text, pattern) {
+  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
+  return new RegExp(`^${escaped}$`).test(text);
+}
+
+function matchesDefaultIgnore(relativeUnixPath) {
+  const parts = relativeUnixPath.split("/").filter(Boolean);
+  return parts.some((part) => DEFAULT_IGNORE_SEGMENTS.includes(part));
+}
+
+function matchesUserIgnorePattern(relativeUnixPath, pattern) {
+  const normalizedPattern = pattern.replace(/\\/g, "/").replace(/^\.\/+/, "");
+  if (!normalizedPattern) {
+    return false;
+  }
+
+  if (normalizedPattern.includes("*") || normalizedPattern.includes("?")) {
+    const basename = relativeUnixPath.split("/").pop() || relativeUnixPath;
+    return (
+      globMatch(relativeUnixPath, normalizedPattern) ||
+      globMatch(basename, normalizedPattern)
+    );
+  }
+
+  if (normalizedPattern.includes("/")) {
+    return (
+      relativeUnixPath === normalizedPattern ||
+      relativeUnixPath.startsWith(`${normalizedPattern}/`)
+    );
+  }
+
+  const parts = relativeUnixPath.split("/").filter(Boolean);
+  return (
+    relativeUnixPath === normalizedPattern ||
+    relativeUnixPath.startsWith(`${normalizedPattern}/`) ||
+    parts.includes(normalizedPattern)
+  );
+}
+
+function createIgnoreChecker(projectPath, userPatterns) {
+  const resolvedProjectPath = path.resolve(projectPath);
+  const userIgnoreList = parseIgnorePaths(userPatterns);
+
+  return function isIgnored(filePath) {
+    const resolvedFilePath = path.resolve(filePath);
+    const relativePath = path.relative(resolvedProjectPath, resolvedFilePath);
+    if (!relativePath || relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
+      return true;
+    }
+
+    const relativeUnixPath = relativePath.split(path.sep).join("/");
+    if (matchesDefaultIgnore(relativeUnixPath)) {
+      return true;
+    }
+
+    return userIgnoreList.some((pattern) =>
+      matchesUserIgnorePattern(relativeUnixPath, pattern)
+    );
+  };
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getErrorMessage(error) {
+  return error && error.message ? String(error.message) : "未知错误";
+}
+
+function isTooManyConnectionsError(error) {
+  const message = getErrorMessage(error).toLowerCase();
+  return message.includes("421") || message.includes("too many connections");
+}
+
+function isRetryableConnectionError(error) {
+  const message = getErrorMessage(error).toLowerCase();
+  return (
+    isTooManyConnectionsError(error) ||
+    message.includes("econnreset") ||
+    message.includes("econnrefused") ||
+    message.includes("timed out") ||
+    message.includes("timeout") ||
+    message.includes("not connected")
+  );
+}
+
+function formatFriendlyConnectError(error) {
+  const message = getErrorMessage(error);
+  if (isTooManyConnectionsError(error)) {
+    return `${message}（服务器连接数已满，请稍后重试或减少并发实例）`;
+  }
+  return message;
+}
+
+async function accessClientWithRetry(client, config, options = {}) {
+  const retryOptions = {
+    ...DEFAULT_CONNECT_RETRY_OPTIONS,
+    ...(options.retry || {}),
+  };
+
+  let lastError = null;
+  for (let attempt = 0; attempt < retryOptions.maxRetries; attempt += 1) {
+    try {
+      await client.access({
+        host: config.host,
+        port: Number(config.port) || 21,
+        user: config.username,
+        password: config.password,
+        secure: false,
+      });
+      return;
+    } catch (error) {
+      lastError = error;
+      const nextAttempt = attempt + 1;
+      if (!isRetryableConnectionError(error) || nextAttempt >= retryOptions.maxRetries) {
+        break;
+      }
+      const delayMs = Math.min(
+        retryOptions.maxDelayMs,
+        retryOptions.initialDelayMs * (2 ** attempt)
+      );
+      if (typeof options.onRetry === "function") {
+        options.onRetry({
+          attempt: nextAttempt,
+          total: retryOptions.maxRetries,
+          delayMs,
+          error,
+        });
+      }
+      await sleep(delayMs);
+    }
+  }
+
+  throw lastError;
+}
+
 class FtpSyncService {
   constructor(options) {
     this.projectPath = options.projectPath;
     this.config = options.config;
+    this.ignorePaths = parseIgnorePaths(
+      options.ignorePaths !== undefined ? options.ignorePaths : options.config?.ignorePaths
+    );
+    this.ignoreChecker = createIgnoreChecker(this.projectPath, this.ignorePaths);
     this.onLog = options.onLog || (() => {});
     this.client = null;
     this.watcher = null;
     this.eventTimer = null;
     this.eventQueue = new Map();
     this.isRunning = false;
+    this.connectionLock = null;
+    this.connectRetry = {
+      ...DEFAULT_CONNECT_RETRY_OPTIONS,
+      ...(options.connectRetry || {}),
+    };
   }
 
   log(level, message) {
     this.onLog(level, message);
   }
 
-  async start() {
-    this.client = new ftp.Client(0);
-    this.client.ftp.verbose = false;
-
-    this.client.trackProgress((info) => {
+  attachClientHooks(client) {
+    client.ftp.verbose = false;
+    client.trackProgress((info) => {
       if (info.type === "upload") {
         this.log("info", `已上传: ${info.name}`);
       }
     });
+  }
 
+  closeClientSafe() {
+    if (!this.client) {
+      return;
+    }
+    try {
+      this.client.close();
+    } catch (_error) {
+      // close 失败不影响后续重连流程。
+    } finally {
+      this.client = null;
+    }
+  }
+
+  async connectWithRetry(reasonLabel) {
+    let lastError = null;
+    for (let attempt = 0; attempt < this.connectRetry.maxRetries; attempt += 1) {
+      this.closeClientSafe();
+      const client = new ftp.Client(0);
+      this.attachClientHooks(client);
+      this.client = client;
+
+      try {
+        await accessClientWithRetry(this.client, this.config, {
+          retry: {
+            maxRetries: 1,
+            initialDelayMs: this.connectRetry.initialDelayMs,
+            maxDelayMs: this.connectRetry.maxDelayMs,
+          },
+        });
+        return;
+      } catch (error) {
+        lastError = error;
+        const nextAttempt = attempt + 1;
+        const friendlyMessage = formatFriendlyConnectError(error);
+        if (!isRetryableConnectionError(error) || nextAttempt >= this.connectRetry.maxRetries) {
+          break;
+        }
+        const delayMs = Math.min(
+          this.connectRetry.maxDelayMs,
+          this.connectRetry.initialDelayMs * (2 ** attempt)
+        );
+        this.log(
+          "warn",
+          `${reasonLabel}失败（第 ${nextAttempt}/${this.connectRetry.maxRetries} 次）：${friendlyMessage}，${delayMs}ms 后重试。`
+        );
+        if (isTooManyConnectionsError(error)) {
+          this.log("warn", "FTP 服务器返回 421/连接数过多，建议稍等后再试或减少并行同步实例。");
+        }
+        await sleep(delayMs);
+      }
+    }
+
+    throw new Error(`FTP 连接失败: ${formatFriendlyConnectError(lastError)}`);
+  }
+
+  async reconnectWithLock(reason) {
+    if (this.connectionLock) {
+      await this.connectionLock;
+      return;
+    }
+    this.connectionLock = (async () => {
+      this.log("info", `正在重连 FTP（原因：${reason}）`);
+      await this.connectWithRetry("FTP 重连");
+      this.log("info", "FTP 重连成功。");
+    })();
+    try {
+      await this.connectionLock;
+    } finally {
+      this.connectionLock = null;
+    }
+  }
+
+  async runWithReconnect(operationName, handler) {
+    try {
+      return await handler();
+    } catch (error) {
+      if (!isRetryableConnectionError(error)) {
+        throw error;
+      }
+      const friendlyMessage = formatFriendlyConnectError(error);
+      this.log(
+        "warn",
+        `${operationName}遇到连接异常：${friendlyMessage}，将关闭旧连接后重连并重试一次。`
+      );
+      await this.reconnectWithLock(friendlyMessage);
+      return handler();
+    }
+  }
+
+  async start() {
     this.log(
       "info",
       `正在连接 FTP: ${this.config.host}:${Number(this.config.port) || 21}`
     );
 
-    try {
-      await this.client.access({
-        host: this.config.host,
-        port: Number(this.config.port) || 21,
-        user: this.config.username,
-        password: this.config.password,
-        secure: false,
-      });
-    } catch (error) {
-      const msg = error && error.message ? error.message : "未知连接错误";
-      this.log("error", `FTP 连接失败: ${msg}`);
-      throw new Error(`FTP 连接失败: ${msg}`);
-    }
+    await this.connectWithRetry("FTP 连接");
 
     this.isRunning = true;
     this.startWatching();
@@ -67,7 +318,7 @@ class FtpSyncService {
     this.watcher = chokidar.watch(this.projectPath, {
       ignoreInitial: true,
       persistent: true,
-      ignored: DEFAULT_IGNORES,
+      ignored: (filePath) => this.ignoreChecker(filePath),
       awaitWriteFinish: {
         stabilityThreshold: 300,
         pollInterval: 100,
@@ -83,7 +334,25 @@ class FtpSyncService {
     });
   }
 
+  updateIgnorePaths(ignorePaths) {
+    this.ignorePaths = parseIgnorePaths(ignorePaths);
+    this.ignoreChecker = createIgnoreChecker(this.projectPath, this.ignorePaths);
+
+    if (!this.isRunning || !this.watcher) {
+      return;
+    }
+
+    this.watcher.close();
+    this.watcher = null;
+    this.startWatching();
+    this.log("info", "忽略路径已更新，文件监听器已重启。");
+  }
+
   enqueueEvent(eventName, filePath) {
+    if (this.ignoreChecker(filePath)) {
+      return;
+    }
+
     const key = filePath;
     this.eventQueue.set(key, { eventName, filePath, at: Date.now() });
 
@@ -99,12 +368,11 @@ class FtpSyncService {
   }
 
   normalizeRemotePath(localPath) {
-    const relativePath = path.relative(this.projectPath, localPath);
-    const base = (this.config.remoteBasePath || "/").replace(/\\/g, "/");
-    const safeBase = base.endsWith("/") ? base.slice(0, -1) : base;
-    const relUnix = relativePath.split(path.sep).join("/");
-    const combined = `${safeBase}/${relUnix}`.replace(/\/+/g, "/");
-    return combined.startsWith("/") ? combined : `/${combined}`;
+    return localPathToRemote(
+      this.projectPath,
+      this.config.remoteBasePath,
+      localPath
+    );
   }
 
   async processQueue(queue) {
@@ -112,25 +380,29 @@ class FtpSyncService {
       return;
     }
 
-    for (const item of queue) {
+    const pending = queue.filter((item) => !this.ignoreChecker(item.filePath));
+
+    for (const item of pending) {
       const remotePath = this.normalizeRemotePath(item.filePath);
       try {
         if (item.eventName === "add" || item.eventName === "change") {
-          await this.ensureRemoteDir(remotePath);
-          await this.client.uploadFrom(item.filePath, remotePath);
+          await this.runWithReconnect(`${item.eventName} 上传`, async () => {
+            await this.ensureRemoteDir(remotePath);
+            await this.client.uploadFrom(item.filePath, remotePath);
+          });
           this.log("info", `${item.eventName} -> 上传 ${remotePath}`);
         } else if (item.eventName === "addDir") {
-          await this.client.ensureDir(remotePath);
+          await this.runWithReconnect("创建目录", () => this.client.ensureDir(remotePath));
           this.log("info", `创建远程目录 ${remotePath}`);
         } else if (item.eventName === "unlink") {
-          await this.client.remove(remotePath);
+          await this.runWithReconnect("删除文件", () => this.client.remove(remotePath));
           this.log("info", `删除远程文件 ${remotePath}`);
         } else if (item.eventName === "unlinkDir") {
-          await this.client.removeDir(remotePath);
+          await this.runWithReconnect("删除目录", () => this.client.removeDir(remotePath));
           this.log("info", `删除远程目录 ${remotePath}`);
         }
       } catch (error) {
-        const message = error && error.message ? error.message : "未知错误";
+        const message = formatFriendlyConnectError(error);
         this.log(
           "error",
           `${item.eventName} 同步失败: ${remotePath}，原因: ${message}`
@@ -157,13 +429,12 @@ class FtpSyncService {
       this.watcher = null;
     }
     if (this.client) {
-      this.client.close();
-      this.client = null;
+      this.closeClientSafe();
     }
   }
 }
 
-async function listRemoteDirWithConfig(config, targetPath) {
+async function listRemoteDirWithConfig(config, targetPath, options = {}) {
   if (!config || !config.host || !config.username) {
     throw new Error("请先完善 FTP 配置（主机、用户名）");
   }
@@ -175,12 +446,15 @@ async function listRemoteDirWithConfig(config, targetPath) {
   const currentPath = (targetPath || normalizedBasePath || "/").replace(/\\/g, "/");
 
   try {
-    await client.access({
-      host: config.host,
-      port: Number(config.port) || 21,
-      user: config.username,
-      password: config.password,
-      secure: false,
+    await accessClientWithRetry(client, config, {
+      onRetry: ({ attempt, total, delayMs, error }) => {
+        if (typeof options?.onLog === "function") {
+          options.onLog(
+            "warn",
+            `列目录连接重试（第 ${attempt}/${total} 次）：${formatFriendlyConnectError(error)}，${delayMs}ms 后重试。`
+          );
+        }
+      },
     });
 
     const list = await client.list(currentPath);
@@ -206,6 +480,71 @@ async function listRemoteDirWithConfig(config, targetPath) {
   }
 }
 
+function normalizeRelativeUnixPath(relativePath) {
+  return String(relativePath || "")
+    .replace(/\\/g, "/")
+    .replace(/^\.\/+/, "");
+}
+
+function buildProjectLocalPath(projectPath, relativePath) {
+  const normalized = normalizeRelativeUnixPath(relativePath);
+  if (!normalized) {
+    return path.resolve(projectPath);
+  }
+  return path.join(
+    path.resolve(projectPath),
+    ...normalized.split("/").filter(Boolean)
+  );
+}
+
+// git diff / ls-files 输出路径相对仓库根目录，先拼到 gitRoot 再换算 projectRel
+function gitOutputToProjectRelative(gitRoot, projectPath, gitOutputPath) {
+  const normalizedGitRel = normalizeRelativeUnixPath(gitOutputPath);
+  if (!normalizedGitRel) {
+    return null;
+  }
+
+  const absolutePath = path.resolve(gitRoot, normalizedGitRel);
+  const resolvedProjectPath = path.resolve(projectPath);
+  const projectRelative = path.relative(resolvedProjectPath, absolutePath);
+  if (
+    !projectRelative ||
+    projectRelative.startsWith("..") ||
+    path.isAbsolute(projectRelative)
+  ) {
+    return null;
+  }
+
+  return projectRelative.split(path.sep).join("/");
+}
+
+function isWindowsAbsolutePath(value) {
+  return /^[A-Za-z]:[\\/]/.test(String(value || "")) || String(value || "").startsWith("\\\\");
+}
+
+function assertPosixRemotePath(remotePath, label) {
+  const normalized = String(remotePath || "").replace(/\\/g, "/");
+  if (isWindowsAbsolutePath(normalized)) {
+    throw new Error(`${label || "远程路径"}不能为 Windows 本地绝对路径: ${remotePath}`);
+  }
+  if (!normalized.startsWith("/")) {
+    throw new Error(`${label || "远程路径"}必须为 posix 绝对路径: ${remotePath}`);
+  }
+  return normalized;
+}
+
+function joinPosixRemotePath(basePath, ...segments) {
+  const base = String(basePath || "/").replace(/\\/g, "/");
+  const safeBase = base.endsWith("/") ? base.slice(0, -1) : base;
+  const parts = segments
+    .flatMap((segment) => String(segment || "").split("/"))
+    .filter(Boolean);
+  const combined = parts.length
+    ? path.posix.join(safeBase || "/", ...parts)
+    : safeBase || "/";
+  return combined.startsWith("/") ? combined : `/${combined}`;
+}
+
 function localPathToRemote(projectPath, remoteBasePath, localPath) {
   const resolvedProjectPath = path.resolve(projectPath);
   const resolvedLocalPath = path.resolve(localPath);
@@ -217,10 +556,10 @@ function localPathToRemote(projectPath, remoteBasePath, localPath) {
   const base = (remoteBasePath || "/").replace(/\\/g, "/");
   const safeBase = base.endsWith("/") ? base.slice(0, -1) : base;
   const relUnix = relativePath.split(path.sep).join("/");
-  const combined = relUnix
-    ? `${safeBase}/${relUnix}`.replace(/\/+/g, "/")
-    : safeBase || "/";
-  return combined.startsWith("/") ? combined : `/${combined}`;
+  const remotePath = relUnix
+    ? joinPosixRemotePath(safeBase || "/", relUnix)
+    : joinPosixRemotePath(safeBase || "/");
+  return assertPosixRemotePath(remotePath, "FTP 上传目标");
 }
 
 function remotePathToLocal(projectPath, remoteBasePath, remotePath) {
@@ -253,13 +592,7 @@ async function withFtpClient(config, handler) {
   client.ftp.verbose = false;
 
   try {
-    await client.access({
-      host: config.host,
-      port: Number(config.port) || 21,
-      user: config.username,
-      password: config.password,
-      secure: false,
-    });
+    await accessClientWithRetry(client, config);
     return await handler(client);
   } finally {
     client.close();
@@ -298,9 +631,110 @@ async function syncLocalToRemote({ projectPath, config, localPath, onLog }) {
   });
 }
 
+async function syncFilesList({ projectPath, config, fileEntries, onLog }) {
+  const log = onLog || (() => {});
+  const resolvedProjectPath = path.resolve(projectPath);
+  const defaultIgnoreChecker = createIgnoreChecker(resolvedProjectPath, []);
+  const entries = Array.isArray(fileEntries) ? fileEntries : [];
+
+  const pending = [];
+  let skipped = 0;
+
+  for (const entry of entries) {
+    const relativePath = normalizeRelativeUnixPath(entry.relativePath);
+    if (!relativePath) {
+      continue;
+    }
+
+    const localPath = buildProjectLocalPath(resolvedProjectPath, relativePath);
+    if (defaultIgnoreChecker(localPath)) {
+      skipped += 1;
+      continue;
+    }
+
+    pending.push({
+      relativePath,
+      action: entry.action === "delete" ? "delete" : "upload",
+      localPath,
+    });
+  }
+
+  if (skipped > 0) {
+    log("info", `已跳过 ${skipped} 个内置忽略路径下的文件。`);
+  }
+
+  if (pending.length === 0) {
+    return { ok: true, total: 0, success: [], failed: [], skipped };
+  }
+
+  log("info", `找到 ${pending.length} 个待同步文件。`);
+
+  const success = [];
+  const failed = [];
+
+  await withFtpClient(config, async (client) => {
+    for (const entry of pending) {
+      const remotePath = localPathToRemote(
+        resolvedProjectPath,
+        config.remoteBasePath,
+        entry.localPath
+      );
+
+      try {
+        if (entry.action === "delete") {
+          await client.remove(remotePath);
+          log("info", `[删除] ${entry.relativePath} -> ${remotePath}`);
+          success.push({ relativePath: entry.relativePath, action: "delete" });
+        } else {
+          try {
+            const stat = await fs.stat(entry.localPath);
+            if (!stat.isFile()) {
+              throw new Error(`路径解析错误，本地路径不是文件: ${entry.localPath}`);
+            }
+          } catch (error) {
+            if (error && error.code === "ENOENT") {
+              throw new Error(`路径解析错误，本地文件不存在: ${entry.localPath}`);
+            }
+            throw error;
+          }
+
+          await ensureRemoteParentDir(client, remotePath);
+          await client.uploadFrom(entry.localPath, remotePath);
+          log("info", `[上传] ${entry.relativePath} -> ${remotePath}`);
+          success.push({ relativePath: entry.relativePath, action: "upload" });
+        }
+      } catch (error) {
+        const message = error && error.message ? error.message : "未知错误";
+        log("error", `[失败] ${entry.relativePath}：${message}`);
+        failed.push({
+          relativePath: entry.relativePath,
+          action: entry.action,
+          message,
+        });
+      }
+    }
+  });
+
+  log(
+    "info",
+    `Git 变更同步完成：成功 ${success.length} 个，失败 ${failed.length} 个。`
+  );
+
+  return {
+    ok: failed.length === 0,
+    total: pending.length,
+    success,
+    failed,
+    skipped,
+  };
+}
+
 async function syncRemoteToLocal({ projectPath, config, remotePath, itemType, onLog }) {
   const log = onLog || (() => {});
-  const normalizedRemotePath = (remotePath || "/").replace(/\\/g, "/");
+  const normalizedRemotePath = assertPosixRemotePath(
+    (remotePath || "/").replace(/\\/g, "/"),
+    "FTP 下载源"
+  );
   const localPath = remotePathToLocal(
     projectPath,
     config.remoteBasePath,
@@ -310,14 +744,61 @@ async function syncRemoteToLocal({ projectPath, config, remotePath, itemType, on
   await withFtpClient(config, async (client) => {
     if (itemType === "dir") {
       await fs.mkdir(localPath, { recursive: true });
-      await client.downloadToDir(normalizedRemotePath, localPath);
+      await client.downloadToDir(localPath, normalizedRemotePath);
       log("info", `已下载目录: ${normalizedRemotePath} -> ${localPath}`);
       return;
     }
 
     await fs.mkdir(path.dirname(localPath), { recursive: true });
-    await client.downloadTo(normalizedRemotePath, localPath);
+    await client.downloadTo(localPath, normalizedRemotePath);
     log("info", `已下载文件: ${normalizedRemotePath} -> ${localPath}`);
+  });
+}
+
+async function syncServerToLocalByLocalPath({ projectPath, config, localPath, onLog }) {
+  const resolvedLocalPath = path.resolve(localPath);
+  const remotePath = localPathToRemote(projectPath, config.remoteBasePath, resolvedLocalPath);
+  let itemType = "file";
+  try {
+    const stat = await fs.stat(resolvedLocalPath);
+    itemType = stat.isDirectory() ? "dir" : "file";
+  } catch (error) {
+    if (!error || error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  await syncRemoteToLocal({
+    projectPath,
+    config,
+    remotePath,
+    itemType,
+    onLog,
+  });
+}
+
+async function syncLocalToServerByRemotePath({
+  projectPath,
+  config,
+  remotePath,
+  itemType,
+  onLog,
+}) {
+  const normalizedRemotePath = assertPosixRemotePath(
+    (remotePath || "/").replace(/\\/g, "/"),
+    "FTP 上传源映射"
+  );
+  const localPath = remotePathToLocal(
+    projectPath,
+    config.remoteBasePath,
+    normalizedRemotePath
+  );
+
+  await syncLocalToRemote({
+    projectPath,
+    config,
+    localPath,
+    onLog,
   });
 }
 
@@ -326,4 +807,15 @@ module.exports = {
   listRemoteDirWithConfig,
   syncLocalToRemote,
   syncRemoteToLocal,
+  syncServerToLocalByLocalPath,
+  syncLocalToServerByRemotePath,
+  syncFilesList,
+  parseIgnorePaths,
+  createIgnoreChecker,
+  normalizeRelativeUnixPath,
+  buildProjectLocalPath,
+  gitOutputToProjectRelative,
+  localPathToRemote,
+  DEFAULT_IGNORES,
+  DEFAULT_IGNORE_SEGMENTS,
 };

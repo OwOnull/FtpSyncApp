@@ -1,6 +1,19 @@
 const fs = require("fs/promises");
 const path = require("path");
 
+function normalizeIgnorePaths(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item).trim()).filter(Boolean);
+  }
+  if (typeof value === "string") {
+    return value
+      .split(/\r?\n/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
 class ConfigStore {
   constructor(userDataPath) {
     this.userDataPath = userDataPath;
@@ -33,13 +46,15 @@ class ConfigStore {
   }
 
   getProjectConfig(projectPath) {
-    return this.state.projects[projectPath] || {
-      type: "ftp",
-      host: "",
-      port: 21,
-      username: "",
-      password: "",
-      remoteBasePath: "/",
+    const stored = this.state.projects[projectPath] || {};
+    return {
+      type: stored.type || "ftp",
+      host: stored.host || "",
+      port: Number(stored.port) || 21,
+      username: stored.username || "",
+      password: stored.password || "",
+      remoteBasePath: stored.remoteBasePath || "/",
+      ignorePaths: normalizeIgnorePaths(stored.ignorePaths),
     };
   }
 
@@ -51,7 +66,27 @@ class ConfigStore {
       username: config.username || "",
       password: config.password || "",
       remoteBasePath: config.remoteBasePath || "/",
+      ignorePaths: normalizeIgnorePaths(config.ignorePaths),
     };
+  }
+
+  listProjectPaths() {
+    return Object.keys(this.state.projects || {});
+  }
+
+  removeProject(projectPath) {
+    const targetPath = String(projectPath || "");
+    if (!targetPath) {
+      return false;
+    }
+    if (!Object.prototype.hasOwnProperty.call(this.state.projects, targetPath)) {
+      return false;
+    }
+    delete this.state.projects[targetPath];
+    if (this.state.lastProjectPath === targetPath) {
+      this.state.lastProjectPath = "";
+    }
+    return true;
   }
 
   async flush() {
@@ -66,4 +101,5 @@ class ConfigStore {
 
 module.exports = {
   ConfigStore,
+  normalizeIgnorePaths,
 };

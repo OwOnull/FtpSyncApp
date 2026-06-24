@@ -23,13 +23,23 @@ const el = {
   username: document.getElementById("username"),
   password: document.getElementById("password"),
   remoteBasePath: document.getElementById("remoteBasePath"),
+  ignorePaths: document.getElementById("ignorePaths"),
   btnChooseProject: document.getElementById("btnChooseProject"),
+  btnProjectHistory: document.getElementById("btnProjectHistory"),
+  projectHistoryDialog: document.getElementById("projectHistoryDialog"),
+  projectHistoryContent: document.getElementById("projectHistoryContent"),
+  projectHistoryList: document.getElementById("projectHistoryList"),
+  projectHistoryEmpty: document.getElementById("projectHistoryEmpty"),
+  btnCloseProjectHistory: document.getElementById("btnCloseProjectHistory"),
   btnSaveConfig: document.getElementById("btnSaveConfig"),
   btnStartSync: document.getElementById("btnStartSync"),
   btnStopSync: document.getElementById("btnStopSync"),
+  btnSyncGitUnstaged: document.getElementById("btnSyncGitUnstaged"),
+  btnExtractGitUnstaged: document.getElementById("btnExtractGitUnstaged"),
   logs: document.getElementById("logs"),
   logDrawer: document.getElementById("logDrawer"),
   btnToggleLogs: document.getElementById("btnToggleLogs"),
+  btnClearLogs: document.getElementById("btnClearLogs"),
   btnRefreshLocal: document.getElementById("btnRefreshLocal"),
   btnLocalUp: document.getElementById("btnLocalUp"),
   localPath: document.getElementById("localPath"),
@@ -42,13 +52,19 @@ const el = {
   remoteList: document.getElementById("remoteList"),
   contextMenu: document.getElementById("contextMenu"),
   contextSyncToServer: document.querySelector('[data-action="sync-to-server"]'),
+  contextSyncFromServer: document.querySelector('[data-action="sync-from-server"]'),
   contextSyncToLocal: document.querySelector('[data-action="sync-to-local"]'),
+  contextSyncFromLocal: document.querySelector('[data-action="sync-from-local"]'),
 };
 
 function appendLog(level, message) {
   const line = `[${new Date().toLocaleTimeString()}] [${level}] ${message}`;
   el.logs.textContent += `${line}\n`;
   el.logs.scrollTop = el.logs.scrollHeight;
+}
+
+function clearLogs() {
+  el.logs.textContent = "";
 }
 
 function getMaxLogDrawerHeight() {
@@ -217,6 +233,23 @@ function bindLogDrawerViewportSync() {
   });
 }
 
+function parseIgnorePathsText(text) {
+  return String(text || "")
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function formatIgnorePathsForTextarea(ignorePaths) {
+  if (Array.isArray(ignorePaths)) {
+    return ignorePaths.join("\n");
+  }
+  if (typeof ignorePaths === "string") {
+    return ignorePaths;
+  }
+  return "";
+}
+
 function getFormConfig() {
   return {
     type: el.type.value,
@@ -225,6 +258,7 @@ function getFormConfig() {
     username: el.username.value.trim(),
     password: el.password.value,
     remoteBasePath: el.remoteBasePath.value.trim() || "/",
+    ignorePaths: parseIgnorePathsText(el.ignorePaths.value),
   };
 }
 
@@ -236,12 +270,94 @@ function setFormConfig(config) {
   el.username.value = c.username || "";
   el.password.value = c.password || "";
   el.remoteBasePath.value = c.remoteBasePath || "/";
+  el.ignorePaths.value = formatIgnorePathsForTextarea(c.ignorePaths);
 }
 
 function setProjectPath(projectPath) {
   state.projectPath = projectPath || "";
   state.localPath = state.projectPath;
-  el.projectPath.value = state.projectPath;
+  el.projectPath.textContent = state.projectPath || "-";
+}
+
+async function chooseProjectFromHistory() {
+  const list = await window.appApi.listProjectHistory();
+  const history = Array.isArray(list) ? list.filter((item) => item && item.projectPath) : [];
+  renderProjectHistory(history);
+
+  if (!el.projectHistoryDialog.open) {
+    el.projectHistoryDialog.showModal();
+  }
+}
+
+function closeProjectHistoryDialog() {
+  if (el.projectHistoryDialog.open) {
+    el.projectHistoryDialog.close();
+  }
+}
+
+function renderProjectHistory(history) {
+  const list = Array.isArray(history) ? history : [];
+  el.projectHistoryList.innerHTML = "";
+  const isEmpty = list.length === 0;
+  el.projectHistoryEmpty.classList.toggle("hidden", !isEmpty);
+  el.projectHistoryList.classList.toggle("hidden", isEmpty);
+  if (isEmpty) {
+    appendLog("info", "暂无历史项目，请先手动选择项目。");
+    return;
+  }
+
+  list.forEach((item) => {
+    const li = document.createElement("li");
+    li.className = "project-history-row";
+
+    const chooseButton = document.createElement("button");
+    chooseButton.type = "button";
+    chooseButton.className = "project-history-item";
+    chooseButton.textContent = item.projectPath;
+    chooseButton.title = item.projectPath;
+    chooseButton.addEventListener("click", async () => {
+      await applySelectedProject(item, { logMessage: "已加载历史项目" });
+      closeProjectHistoryDialog();
+    });
+
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "project-history-delete";
+    deleteButton.textContent = "关闭";
+    deleteButton.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const result = await window.appApi.deleteProjectHistoryItem({
+        projectPath: item.projectPath,
+      });
+      if (!result || !result.ok) {
+        appendLog("error", (result && result.message) || "删除历史项目失败。");
+        return;
+      }
+      appendLog("info", `已删除历史项目: ${item.projectPath}`);
+      const updated = await window.appApi.listProjectHistory();
+      const nextHistory = Array.isArray(updated) ? updated.filter((entry) => entry && entry.projectPath) : [];
+      renderProjectHistory(nextHistory);
+    });
+
+    li.appendChild(chooseButton);
+    li.appendChild(deleteButton);
+    el.projectHistoryList.appendChild(li);
+  });
+}
+
+async function applySelectedProject(selected, options) {
+  if (!selected || !selected.projectPath) {
+    appendLog("warn", "历史项目数据无效。");
+    return;
+  }
+  const logMessage = options?.logMessage;
+  setProjectPath(selected.projectPath);
+  setFormConfig(selected.config);
+  if (logMessage) {
+    appendLog("info", `${logMessage}: ${selected.projectPath}`);
+  }
+  await refreshLocalDir(selected.projectPath);
 }
 
 function setPanelError(errorEl, message) {
@@ -259,7 +375,9 @@ function showContextMenu(event, item, panel) {
   state.contextTarget = { item, panel };
   const isLocal = panel === "local";
   el.contextSyncToServer.classList.toggle("hidden", !isLocal);
+  el.contextSyncFromServer.classList.toggle("hidden", !isLocal);
   el.contextSyncToLocal.classList.toggle("hidden", isLocal);
+  el.contextSyncFromLocal.classList.toggle("hidden", isLocal);
 
   el.contextMenu.classList.remove("hidden");
   const menuWidth = el.contextMenu.offsetWidth || 160;
@@ -367,10 +485,10 @@ async function chooseProject() {
   if (result.cancelled) {
     return;
   }
-  setProjectPath(result.projectPath);
-  setFormConfig(result.config);
-  appendLog("info", `已选择项目: ${result.projectPath}`);
-  await refreshLocalDir(result.projectPath);
+  await applySelectedProject({
+    projectPath: result.projectPath,
+    config: result.config,
+  }, { logMessage: "已选择项目" });
 }
 
 async function saveConfig() {
@@ -414,6 +532,152 @@ async function startSync() {
 async function stopSync() {
   await window.appApi.stopSync();
   appendLog("info", "同步已停止。");
+}
+
+async function extractGitUnstaged() {
+  if (!state.projectPath) {
+    appendLog("warn", "请先选择项目目录。");
+    return;
+  }
+
+  openLogDrawer();
+  appendLog("info", "正在收集 Git 未暂存变更…");
+  el.btnExtractGitUnstaged.disabled = true;
+
+  try {
+    const result = await window.appApi.extractGitUnstaged({
+      projectPath: state.projectPath,
+    });
+
+    if (!result.ok && result.code) {
+      appendLog("error", result.message || "提取 Git 未暂存的变更失败。");
+      return;
+    }
+
+    if (!result.ok && result.message && !result.total) {
+      appendLog("error", result.message);
+      return;
+    }
+
+    if (result.total === 0) {
+      appendLog("info", result.message || "没有需要提取的文件。");
+      return;
+    }
+
+    appendLog("info", result.message || "Git 未暂存的变更提取完成。");
+    if (result.failed && result.failed.length) {
+      result.failed.forEach((item) => {
+        appendLog(
+          "error",
+          `失败: ${item.relativePath} (${item.action}) - ${item.message || "未知错误"}`
+        );
+      });
+    }
+  } finally {
+    el.btnExtractGitUnstaged.disabled = false;
+  }
+}
+
+async function syncGitUnstaged() {
+  if (!state.projectPath) {
+    appendLog("warn", "请先选择项目目录。");
+    return;
+  }
+
+  const config = getFormConfig();
+  if (!config.host || !config.username) {
+    appendLog("warn", "请先完善 FTP 配置。");
+    return;
+  }
+
+  openLogDrawer();
+  appendLog("info", "正在获取 Git 未暂存变更…");
+  el.btnSyncGitUnstaged.disabled = true;
+
+  try {
+    const result = await window.appApi.syncGitUnstaged({
+      projectPath: state.projectPath,
+      config,
+    });
+
+    if (!result.ok) {
+      appendLog("error", result.message || "Git 变更同步失败。");
+      return;
+    }
+
+    if (result.total === 0) {
+      appendLog("info", result.message || "没有需要同步的文件。");
+      return;
+    }
+
+    appendLog("info", result.message || "Git 未暂存变更同步完成。");
+    if (result.failed && result.failed.length) {
+      result.failed.forEach((item) => {
+        appendLog(
+          "error",
+          `失败: ${item.relativePath} (${item.action}) - ${item.message || "未知错误"}`
+        );
+      });
+    }
+    await refreshRemoteDir();
+  } finally {
+    el.btnSyncGitUnstaged.disabled = false;
+  }
+}
+
+async function syncItemFromServer(item) {
+  if (!state.projectPath) {
+    appendLog("warn", "请先选择项目目录。");
+    return;
+  }
+
+  const config = getFormConfig();
+  if (!config.host || !config.username) {
+    appendLog("warn", "请先完善 FTP 配置。");
+    return;
+  }
+
+  appendLog("info", `正在与服务器同步: ${item.name}`);
+  const result = await window.appApi.syncServerToLocalByLocal({
+    projectPath: state.projectPath,
+    config,
+    localPath: item.path,
+  });
+
+  if (result.ok) {
+    appendLog("info", `与服务器同步完成: ${item.name}`);
+    await refreshLocalDir();
+    return;
+  }
+  appendLog("error", result.message || "与服务器同步失败。");
+}
+
+async function syncItemFromLocal(item) {
+  if (!state.projectPath) {
+    appendLog("warn", "请先选择项目目录。");
+    return;
+  }
+
+  const config = getFormConfig();
+  if (!config.host || !config.username) {
+    appendLog("warn", "请先完善 FTP 配置。");
+    return;
+  }
+
+  appendLog("info", `正在与本地同步: ${item.name}`);
+  const result = await window.appApi.syncLocalToServerByRemote({
+    projectPath: state.projectPath,
+    config,
+    remotePath: item.path,
+    itemType: item.type,
+  });
+
+  if (result.ok) {
+    appendLog("info", `与本地同步完成: ${item.name}`);
+    await refreshRemoteDir();
+    return;
+  }
+  appendLog("error", result.message || "与本地同步失败。");
 }
 
 async function syncItemToServer(item) {
@@ -473,9 +737,13 @@ async function syncItemToLocal(item) {
 
 function bindEvents() {
   el.btnChooseProject.addEventListener("click", chooseProject);
+  el.btnProjectHistory.addEventListener("click", chooseProjectFromHistory);
   el.btnSaveConfig.addEventListener("click", saveConfig);
   el.btnStartSync.addEventListener("click", startSync);
   el.btnStopSync.addEventListener("click", stopSync);
+  el.btnSyncGitUnstaged.addEventListener("click", syncGitUnstaged);
+  el.btnExtractGitUnstaged.addEventListener("click", extractGitUnstaged);
+  el.btnClearLogs.addEventListener("click", clearLogs);
   el.btnRefreshLocal.addEventListener("click", () => refreshLocalDir());
   el.btnLocalUp.addEventListener("click", () =>
     window.appApi
@@ -512,6 +780,15 @@ function bindEvents() {
     await syncItemToServer(target.item);
   });
 
+  el.contextSyncFromServer.addEventListener("click", async () => {
+    const target = state.contextTarget;
+    hideContextMenu();
+    if (!target || target.panel !== "local") {
+      return;
+    }
+    await syncItemFromServer(target.item);
+  });
+
   el.contextSyncToLocal.addEventListener("click", async () => {
     const target = state.contextTarget;
     hideContextMenu();
@@ -519,6 +796,15 @@ function bindEvents() {
       return;
     }
     await syncItemToLocal(target.item);
+  });
+
+  el.contextSyncFromLocal.addEventListener("click", async () => {
+    const target = state.contextTarget;
+    hideContextMenu();
+    if (!target || target.panel !== "remote") {
+      return;
+    }
+    await syncItemFromLocal(target.item);
   });
 
   document.addEventListener("click", (event) => {
@@ -536,6 +822,23 @@ function bindEvents() {
   window.addEventListener("blur", hideContextMenu);
   window.addEventListener("resize", hideContextMenu);
   window.addEventListener("scroll", hideContextMenu, true);
+  el.btnCloseProjectHistory.addEventListener("click", () => {
+    closeProjectHistoryDialog();
+  });
+  el.projectHistoryDialog.addEventListener("click", (event) => {
+    if (!el.projectHistoryDialog.open || event.target !== el.projectHistoryDialog) {
+      return;
+    }
+    const contentRect = el.projectHistoryContent.getBoundingClientRect();
+    const isOutsideContent =
+      event.clientX < contentRect.left ||
+      event.clientX > contentRect.right ||
+      event.clientY < contentRect.top ||
+      event.clientY > contentRect.bottom;
+    if (isOutsideContent) {
+      closeProjectHistoryDialog();
+    }
+  });
 }
 
 async function init() {
@@ -557,10 +860,10 @@ async function init() {
 
   const last = await window.appApi.getLastProject();
   if (last && last.projectPath) {
-    setProjectPath(last.projectPath);
-    setFormConfig(last.config);
-    appendLog("info", `已自动加载上次项目: ${last.projectPath}`);
-    await refreshLocalDir(last.projectPath);
+    await applySelectedProject({
+      projectPath: last.projectPath,
+      config: last.config,
+    }, { logMessage: "已自动加载上次项目" });
   } else {
     appendLog("info", "未找到上次项目，请先选择项目目录。");
   }
