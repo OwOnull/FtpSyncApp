@@ -112,11 +112,13 @@
 
                   <button id="btnSyncGitUnstaged" class="secondary" title="上传 Git 工作区未暂存变更到 FTP，不含 git add 已暂存文件">同步 Git 未暂存变更</button>
 
-                  <button id="btnExtractGitUnstaged" class="secondary" title="将 Git 未暂存变更复制到项目根目录下的「项目变更」文件夹，保留目录结构">提取 Git 未暂存变更</button>
+                  <button id="btnExtractGitSinceRef" class="secondary" title="选择未暂存、已暂存或某次提交，将相关文件的当前最新版本复制到「项目变更」文件夹">提取 Git 变更</button>
 
                   <button id="btnStartSync">开始同步</button>
 
                   <button id="btnStopSync" class="danger">停止同步</button>
+
+                  <button id="btnDisconnectFtp" class="secondary">断开 FTP 连接</button>
 
                   <button id="btnSaveConfig">保存配置</button>
 
@@ -242,6 +244,41 @@
         <div class="project-history-body">
           <div id="projectHistoryEmpty" class="project-history-empty hidden">暂无历史项目，请先手动选择项目。</div>
           <ul id="projectHistoryList" class="project-history-list"></ul>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="disconnectFtpDialog" class="confirm-dialog project-history-dialog">
+      <form method="dialog" class="confirm-dialog-content project-history-content" id="disconnectFtpContent">
+        <div class="project-history-header">
+          <h3>断开 FTP 连接</h3>
+          <button id="btnCloseDisconnectFtp" type="button" class="project-history-close" aria-label="关闭弹窗">×</button>
+        </div>
+        <div class="confirm-dialog-body">
+          <p>确定要断开当前应用的所有 FTP 连接吗？</p>
+          <p class="confirm-dialog-hint">此操作仅关闭本应用<strong>当前实例</strong>持有的连接，无法断开其他软件或其他窗口占用的连接。若仍出现 421 错误，请等待服务器释放连接或在面板中清理会话。</p>
+        </div>
+        <div class="confirm-dialog-actions">
+          <button type="button" id="btnCancelDisconnectFtp" class="secondary">取消</button>
+          <button type="button" id="btnConfirmDisconnectFtp" class="danger">确定断开</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="extractGitSinceRefDialog" class="confirm-dialog project-history-dialog">
+      <form method="dialog" class="confirm-dialog-content project-history-content" id="extractGitSinceRefContent">
+        <div class="project-history-header">
+          <h3>提取 Git 变更</h3>
+          <button id="btnCloseExtractGitSinceRef" type="button" class="project-history-close" aria-label="关闭弹窗">×</button>
+        </div>
+        <div class="confirm-dialog-body">
+          <p class="confirm-dialog-hint">选择一项后点击「确认提取」。将复制相关文件的<strong>当前工作区最新版本</strong>到项目下的「项目变更」文件夹（保留目录结构）。</p>
+          <p id="extractGitSinceRefEmpty" class="project-history-empty hidden">正在读取 Git 选项…</p>
+          <ul id="extractGitSinceRefList" class="project-history-list extract-git-ref-list" role="listbox" aria-label="Git 提取选项"></ul>
+        </div>
+        <div class="confirm-dialog-actions">
+          <button type="button" id="btnCancelExtractGitSinceRef" class="secondary">取消</button>
+          <button type="button" id="btnConfirmExtractGitSinceRef" disabled>确认提取</button>
         </div>
       </form>
     </dialog>

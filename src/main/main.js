@@ -16,11 +16,17 @@ const {
   normalizeRelativeUnixPath,
   buildProjectLocalPath,
   gitOutputToProjectRelative,
+  setActiveSyncService,
+  clearActiveSyncService,
+  forceDisconnectAll,
 } = require("../services/ftp-sync-service");
 
 const execFileAsync = promisify(execFile);
 
 const EXTRACT_CHANGES_FOLDER = "项目变更";
+const GIT_EXTRACT_REF_UNSTAGED = "__unstaged__";
+const GIT_EXTRACT_REF_STAGED = "__staged__";
+const GIT_EXTRACT_COMMIT_LIMIT = 40;
 
 let mainWindow = null;
 let syncService = null;
@@ -72,6 +78,8 @@ function getProjectConfigPayload(projectPath) {
 async function stopSyncWithLog() {
   if (syncService) {
     const previousProjectPath = activeSyncProjectPath;
+    const stoppingService = syncService;
+    clearActiveSyncService(stoppingService);
     syncService.stop();
     syncService = null;
     activeSyncProjectPath = "";
@@ -125,7 +133,7 @@ async function execGit(args, options = {}) {
   }
 }
 
-async function collectGitUnstagedFileEntries(projectPath) {
+async function resolveGitRepo(projectPath) {
   const resolvedProjectPath = path.resolve(projectPath);
 
   const repoCheck = await execGit(["rev-parse", "--is-inside-work-tree"], {
@@ -148,8 +156,180 @@ async function collectGitUnstagedFileEntries(projectPath) {
   if (!gitRootResult.ok) {
     return gitRootResult;
   }
-  const gitRoot = path.resolve(gitRootResult.stdout.trim());
 
+  return {
+    ok: true,
+    projectPath: resolvedProjectPath,
+    gitRoot: path.resolve(gitRootResult.stdout.trim()),
+  };
+}
+
+function createGitPathMapper(gitRoot, projectPath) {
+  const entries = [];
+  const seen = new Set();
+  const skippedOutsideProject = [];
+
+  function appendEntry(gitRelativePath, action) {
+    const gitNormalized = normalizeRelativeUnixPath(gitRelativePath);
+    if (!gitNormalized) {
+      return;
+    }
+
+    const projectRelativePath = gitOutputToProjectRelative(
+      gitRoot,
+      projectPath,
+      gitNormalized
+    );
+    if (!projectRelativePath) {
+      skippedOutsideProject.push(gitNormalized);
+      return;
+    }
+    if (seen.has(projectRelativePath)) {
+      return;
+    }
+
+    seen.add(projectRelativePath);
+    entries.push({
+      relativePath: projectRelativePath,
+      action,
+    });
+  }
+
+  return { entries, seen, skippedOutsideProject, appendEntry };
+}
+
+function isGitNoCommitsYetError(message) {
+  const text = String(message || "").toLowerCase();
+  return (
+    text.includes("does not have any commits yet") ||
+    text.includes("bad default revision") ||
+    (text.includes("current branch") && text.includes("does not have any commits"))
+  );
+}
+
+function isGitInvalidRefError(message) {
+  const text = String(message || "").toLowerCase();
+  return (
+    isGitNoCommitsYetError(message) ||
+    text.includes("unknown revision") ||
+    text.includes("bad revision") ||
+    text.includes("ambiguous argument") ||
+    text.includes("needed a single revision")
+  );
+}
+
+function buildGitExtractOptionLabel(option) {
+  if (!option) {
+    return "";
+  }
+  if (option.type === "pseudo" || option.kind === "pseudo") {
+    return option.title || option.ref;
+  }
+  const shortHash = option.shortHash || "";
+  const date = option.date || "";
+  const author = option.author || "";
+  const subject = option.subject || option.message || "";
+  return [shortHash, date, author, subject].filter(Boolean).join("  ");
+}
+
+async function listGitExtractOptions(projectPath, limit = GIT_EXTRACT_COMMIT_LIMIT) {
+  const repo = await resolveGitRepo(projectPath);
+  if (!repo.ok) {
+    return repo;
+  }
+
+  const commitLimit = Math.max(1, Math.min(100, Number(limit) || GIT_EXTRACT_COMMIT_LIMIT));
+  const options = [
+    {
+      ref: GIT_EXTRACT_REF_UNSTAGED,
+      type: "pseudo",
+      kind: "pseudo",
+      title: "未暂存变更",
+      subtitle: "工作区未暂存的修改与未跟踪文件",
+      message: "工作区未暂存的修改与未跟踪文件",
+      label: "未暂存变更",
+    },
+    {
+      ref: GIT_EXTRACT_REF_STAGED,
+      type: "pseudo",
+      kind: "pseudo",
+      title: "已暂存未提交",
+      subtitle: "已暂存但尚未提交的变更",
+      message: "已暂存但尚未提交的变更",
+      label: "已暂存未提交",
+    },
+  ];
+
+  const logResult = await execGit(
+    [
+      "log",
+      `-n${commitLimit}`,
+      "--pretty=format:%H\t%h\t%an\t%ad\t%s",
+      "--date=format:%Y-%m-%d %H:%M",
+    ],
+    { gitRoot: repo.gitRoot }
+  );
+
+  if (!logResult.ok) {
+    if (isGitNoCommitsYetError(logResult.message)) {
+      return {
+        ok: true,
+        options,
+        gitRoot: repo.gitRoot,
+        commitCount: 0,
+      };
+    }
+    return logResult;
+  }
+
+  const lines = String(logResult.stdout || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (const line of lines) {
+    const parts = line.split("\t");
+    if (parts.length < 4) {
+      continue;
+    }
+    const hash = String(parts[0] || "").trim();
+    const shortHash = String(parts[1] || "").trim();
+    const author = String(parts[2] || "").trim();
+    const date = String(parts[3] || "").trim();
+    const subject = parts.slice(4).join("\t").trim();
+    if (!hash) {
+      continue;
+    }
+    const option = {
+      ref: hash,
+      type: "commit",
+      kind: "commit",
+      hash,
+      shortHash: shortHash || hash.slice(0, 7),
+      author,
+      date,
+      subject,
+      message: subject,
+    };
+    option.label = buildGitExtractOptionLabel(option);
+    options.push(option);
+  }
+
+  return {
+    ok: true,
+    options,
+    gitRoot: repo.gitRoot,
+    commitCount: Math.max(0, options.length - 2),
+  };
+}
+
+async function collectGitUnstagedFileEntries(projectPath) {
+  const repo = await resolveGitRepo(projectPath);
+  if (!repo.ok) {
+    return repo;
+  }
+
+  const { projectPath: resolvedProjectPath, gitRoot } = repo;
   const gitRootOptions = { gitRoot };
   const unstagedResult = await execGit(["diff", "--name-only"], gitRootOptions);
   if (!unstagedResult.ok) {
@@ -185,35 +365,10 @@ async function collectGitUnstagedFileEntries(projectPath) {
   const untrackedPaths = parseGitNameList(untrackedResult.stdout);
   const stagedPaths = new Set(parseGitNameList(stagedResult.stdout));
 
-  const entries = [];
-  const seen = new Set();
-  const skippedOutsideProject = [];
-
-  function appendEntry(gitRelativePath, action) {
-    const gitNormalized = normalizeRelativeUnixPath(gitRelativePath);
-    if (!gitNormalized) {
-      return;
-    }
-
-    const projectRelativePath = gitOutputToProjectRelative(
-      gitRoot,
-      resolvedProjectPath,
-      gitNormalized
-    );
-    if (!projectRelativePath) {
-      skippedOutsideProject.push(gitNormalized);
-      return;
-    }
-    if (seen.has(projectRelativePath)) {
-      return;
-    }
-
-    seen.add(projectRelativePath);
-    entries.push({
-      relativePath: projectRelativePath,
-      action,
-    });
-  }
+  const { entries, skippedOutsideProject, appendEntry } = createGitPathMapper(
+    gitRoot,
+    resolvedProjectPath
+  );
 
   for (const relPath of unstagedPaths) {
     const gitNormalized = normalizeRelativeUnixPath(relPath);
@@ -239,6 +394,123 @@ async function collectGitUnstagedFileEntries(projectPath) {
     entries,
     gitRoot,
     skippedOutsideProject,
+  };
+}
+
+async function collectGitChangesSinceRef(projectPath, ref) {
+  const normalizedRef = String(ref || "").trim();
+  if (!normalizedRef) {
+    return {
+      ok: false,
+      code: "invalid_ref",
+      message: "请选择要提取的 Git 选项。",
+    };
+  }
+
+  if (normalizedRef === GIT_EXTRACT_REF_UNSTAGED) {
+    const collectResult = await collectGitUnstagedFileEntries(projectPath);
+    if (!collectResult.ok) {
+      return collectResult;
+    }
+    return {
+      ...collectResult,
+      ref: GIT_EXTRACT_REF_UNSTAGED,
+      refLabel: "未暂存变更",
+      extractMode: "unstaged",
+    };
+  }
+
+  const repo = await resolveGitRepo(projectPath);
+  if (!repo.ok) {
+    return repo;
+  }
+
+  const { projectPath: resolvedProjectPath, gitRoot } = repo;
+  const gitRootOptions = { gitRoot };
+  const { entries, skippedOutsideProject, appendEntry } = createGitPathMapper(
+    gitRoot,
+    resolvedProjectPath
+  );
+
+  if (normalizedRef === GIT_EXTRACT_REF_STAGED) {
+    const stagedResult = await execGit(
+      ["diff", "--cached", "--name-only"],
+      gitRootOptions
+    );
+    if (!stagedResult.ok) {
+      return stagedResult;
+    }
+
+    for (const relPath of parseGitNameList(stagedResult.stdout)) {
+      appendEntry(relPath, "upload");
+    }
+
+    return {
+      ok: true,
+      entries,
+      gitRoot,
+      skippedOutsideProject,
+      ref: GIT_EXTRACT_REF_STAGED,
+      refLabel: "已暂存未提交",
+      extractMode: "copy_skip_missing",
+    };
+  }
+
+  const verifyResult = await execGit(
+    ["rev-parse", "--verify", `${normalizedRef}^{commit}`],
+    gitRootOptions
+  );
+  if (!verifyResult.ok) {
+    return {
+      ok: false,
+      code: "invalid_ref",
+      message: isGitInvalidRefError(verifyResult.message)
+        ? "所选提交不存在（仓库可能尚无 commit）。"
+        : verifyResult.message || "无效的 Git 提交。",
+    };
+  }
+
+  const commitHash = verifyResult.stdout.trim() || normalizedRef;
+  const shortHashResult = await execGit(
+    ["rev-parse", "--short", commitHash],
+    gitRootOptions
+  );
+  const shortHash = shortHashResult.ok
+    ? shortHashResult.stdout.trim()
+    : commitHash.slice(0, 7);
+
+  const diffResult = await execGit(
+    ["diff", "--name-only", commitHash],
+    gitRootOptions
+  );
+  if (!diffResult.ok) {
+    return diffResult;
+  }
+
+  const untrackedResult = await execGit(
+    ["ls-files", "--others", "--exclude-standard"],
+    gitRootOptions
+  );
+  if (!untrackedResult.ok) {
+    return untrackedResult;
+  }
+
+  for (const relPath of parseGitNameList(diffResult.stdout)) {
+    appendEntry(relPath, "upload");
+  }
+  for (const relPath of parseGitNameList(untrackedResult.stdout)) {
+    appendEntry(relPath, "upload");
+  }
+
+  return {
+    ok: true,
+    entries,
+    gitRoot,
+    skippedOutsideProject,
+    ref: commitHash,
+    refLabel: `提交 ${shortHash}`,
+    shortHash,
+    extractMode: "copy_skip_missing",
   };
 }
 
@@ -374,6 +646,137 @@ async function extractGitUnstagedFiles(projectPath) {
     success,
     failed,
     removed,
+    message,
+  };
+}
+
+async function extractGitSinceRef(projectPath, ref) {
+  const normalizedRef = String(ref || "").trim();
+  if (normalizedRef === GIT_EXTRACT_REF_UNSTAGED) {
+    return extractGitUnstagedFiles(projectPath);
+  }
+
+  const resolvedProjectPath = path.resolve(projectPath);
+  const extractRoot = path.join(resolvedProjectPath, EXTRACT_CHANGES_FOLDER);
+
+  const collectResult = await collectGitChangesSinceRef(
+    resolvedProjectPath,
+    normalizedRef
+  );
+  if (!collectResult.ok) {
+    return collectResult;
+  }
+
+  const entries = collectResult.entries.filter(
+    (entry) => !shouldSkipExtractPath(entry.relativePath)
+  );
+
+  if (collectResult.gitRoot && path.resolve(collectResult.gitRoot) !== resolvedProjectPath) {
+    sendLog(
+      "info",
+      `Git 仓库根目录为 ${collectResult.gitRoot}，已按项目目录 ${resolvedProjectPath} 解析相对路径。`
+    );
+  }
+
+  sendLog(
+    "info",
+    `提取范围：${collectResult.refLabel}（复制工作区最新内容）。`
+  );
+
+  if (collectResult.skippedOutsideProject && collectResult.skippedOutsideProject.length) {
+    sendLog(
+      "info",
+      `已跳过 ${collectResult.skippedOutsideProject.length} 个位于 Git 仓库内、但不在当前项目目录下的变更。`
+    );
+  }
+
+  if (!entries.length) {
+    return {
+      ok: true,
+      total: 0,
+      success: [],
+      failed: [],
+      skippedMissing: [],
+      message: `没有需要提取的文件（${collectResult.refLabel} 无变更）。`,
+      ref: collectResult.ref,
+      refLabel: collectResult.refLabel,
+    };
+  }
+
+  await fs.mkdir(extractRoot, { recursive: true });
+
+  sendLog(
+    "info",
+    `找到 ${entries.length} 个变更文件，开始提取到「${EXTRACT_CHANGES_FOLDER}」…`
+  );
+
+  const success = [];
+  const failed = [];
+  const skippedMissing = [];
+
+  for (const entry of entries) {
+    const { relativePath } = entry;
+    const destPath = path.join(extractRoot, ...relativePath.split("/"));
+
+    if (!isPathInsideRoot(resolvedProjectPath, destPath)) {
+      const message = "目标路径超出项目目录。";
+      failed.push({ relativePath, action: "copy", message });
+      sendLog("error", `提取失败: ${relativePath} - ${message}`);
+      continue;
+    }
+
+    const sourcePath = buildProjectLocalPath(resolvedProjectPath, relativePath);
+    if (!isPathInsideRoot(resolvedProjectPath, sourcePath)) {
+      const message = "源路径超出项目目录。";
+      failed.push({ relativePath, action: "copy", message });
+      sendLog("error", `提取失败: ${relativePath} - ${message}`);
+      continue;
+    }
+
+    try {
+      const stat = await fs.stat(sourcePath);
+      if (!stat.isFile()) {
+        skippedMissing.push(relativePath);
+        sendLog("info", `已跳过（当前不是文件）: ${relativePath}`);
+        continue;
+      }
+      await fs.mkdir(path.dirname(destPath), { recursive: true });
+      await fs.copyFile(sourcePath, destPath);
+      success.push(relativePath);
+      sendLog("info", `已提取: ${relativePath}`);
+    } catch (error) {
+      if (error && error.code === "ENOENT") {
+        skippedMissing.push(relativePath);
+        sendLog("info", `已跳过（当前不存在，可能已删除）: ${relativePath}`);
+        continue;
+      }
+      const message = error && error.message ? error.message : "复制文件失败";
+      failed.push({ relativePath, action: "copy", message });
+      sendLog("error", `提取失败: ${relativePath} - ${message}`);
+    }
+  }
+
+  const copiedCount = success.length;
+  const skippedCount = skippedMissing.length;
+  const failedCount = failed.length;
+
+  let message = `提取完成（${collectResult.refLabel}），成功 ${copiedCount} 个`;
+  if (skippedCount) {
+    message += `，跳过已删除/不存在 ${skippedCount} 个`;
+  }
+  if (failedCount) {
+    message += `，失败 ${failedCount} 个`;
+  }
+  message += "。";
+
+  return {
+    ok: failedCount === 0,
+    total: entries.length,
+    success,
+    failed,
+    skippedMissing,
+    ref: collectResult.ref,
+    refLabel: collectResult.refLabel,
     message,
   };
 }
@@ -529,9 +932,11 @@ ipcMain.handle("sync:start", async (_event, payload) => {
 
   try {
     await syncService.start();
+    setActiveSyncService(syncService);
     activeSyncProjectPath = path.resolve(projectPath);
     return { ok: true };
   } catch (error) {
+    clearActiveSyncService(syncService);
     await projectLockManager.release(projectPath);
     syncService = null;
     activeSyncProjectPath = "";
@@ -545,6 +950,34 @@ ipcMain.handle("sync:start", async (_event, payload) => {
 ipcMain.handle("sync:stop", async () => {
   await stopSyncWithLog();
   return { ok: true };
+});
+
+ipcMain.handle("ftp:force-disconnect", async () => {
+  const result = forceDisconnectAll();
+  const parts = [`已关闭 ${result.closedCount} 个本实例 FTP 连接`];
+  if (result.syncConnectionClosed) {
+    parts.push("监听长连接已断开");
+  }
+  if (result.watcherStillRunning) {
+    parts.push("文件监听仍在运行，下次同步时将自动重连");
+  }
+  sendLog("info", `${parts.join("；")}。`);
+  if (result.closedCount === 0 && !result.syncConnectionClosed) {
+    sendLog(
+      "info",
+      "当前本实例无活跃 FTP 连接。若仍出现 421，说明连接被其他软件或其他窗口占用，请等待服务器释放或到面板清理会话。"
+    );
+  } else {
+    sendLog(
+      "warn",
+      "此操作无法断开其他软件或其他应用实例占用的 FTP 连接；若仍 421，请稍候或在服务器面板清理会话。"
+    );
+  }
+  return {
+    ok: true,
+    ...result,
+    message: parts.join("；"),
+  };
 });
 
 ipcMain.handle("list-local-dir", async (_event, payload) => {
@@ -703,14 +1136,41 @@ ipcMain.handle("sync:git-unstaged", async (_event, payload) => {
   }
 });
 
-ipcMain.handle("extract:git-unstaged", async (_event, payload) => {
-  const { projectPath } = payload || {};
+ipcMain.handle("extract:git-list-options", async (_event, payload) => {
+  const { projectPath, limit } = payload || {};
   if (!projectPath) {
     return { ok: false, message: "请先选择项目目录。" };
   }
 
   try {
-    const result = await extractGitUnstagedFiles(projectPath);
+    const result = await listGitExtractOptions(projectPath, limit);
+    if (!result.ok) {
+      return {
+        ok: false,
+        message: result.message || "读取 Git 提交列表失败。",
+        code: result.code,
+      };
+    }
+    return result;
+  } catch (error) {
+    return {
+      ok: false,
+      message: error && error.message ? error.message : "读取 Git 提交列表失败",
+    };
+  }
+});
+
+ipcMain.handle("extract:git-since-ref", async (_event, payload) => {
+  const { projectPath, ref } = payload || {};
+  if (!projectPath) {
+    return { ok: false, message: "请先选择项目目录。" };
+  }
+  if (!ref) {
+    return { ok: false, message: "请选择要提取的 Git 选项。" };
+  }
+
+  try {
+    const result = await extractGitSinceRef(projectPath, ref);
     if (!result.ok && result.code) {
       return {
         ok: false,
@@ -720,14 +1180,14 @@ ipcMain.handle("extract:git-unstaged", async (_event, payload) => {
     }
 
     if (result.total === 0) {
-      sendLog("info", result.message || "没有需要提取的文件（Git 无未暂存变更）。");
+      sendLog("info", result.message || "没有需要提取的文件。");
     }
 
     return result;
   } catch (error) {
     return {
       ok: false,
-      message: error && error.message ? error.message : "提取未暂存变更失败",
+      message: error && error.message ? error.message : "提取 Git 变更失败",
     };
   }
 });

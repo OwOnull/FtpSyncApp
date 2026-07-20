@@ -17,7 +17,9 @@ contextBridge.exposeInMainWorld("appApi", {
   syncLocalToServerByRemote: (payload) =>
     ipcRenderer.invoke("sync-local-to-server-by-remote", payload),
   syncGitUnstaged: (payload) => ipcRenderer.invoke("sync:git-unstaged", payload),
-  extractGitUnstaged: (payload) => ipcRenderer.invoke("extract:git-unstaged", payload),
+  listGitExtractOptions: (payload) => ipcRenderer.invoke("extract:git-list-options", payload),
+  extractGitSinceRef: (payload) => ipcRenderer.invoke("extract:git-since-ref", payload),
+  forceDisconnectFtp: () => ipcRenderer.invoke("ftp:force-disconnect"),
   onLog: (handler) => {
     const listener = (_event, data) => handler(data);
     ipcRenderer.on("sync:log", listener);

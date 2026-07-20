@@ -29,6 +29,105 @@ const DEFAULT_CONNECT_RETRY_OPTIONS = {
   maxDelayMs: 4000,
 };
 
+const TOO_MANY_CONNECTIONS_BACKOFF_MS = 3000;
+
+class FtpConnectionManager {
+  constructor() {
+    this.activeClients = new Set();
+    this.operationQueue = Promise.resolve();
+    this.syncServiceRef = null;
+  }
+
+  setSyncService(service) {
+    this.syncServiceRef = service || null;
+  }
+
+  clearSyncService(service) {
+    if (service && this.syncServiceRef !== service) {
+      return;
+    }
+    this.syncServiceRef = null;
+  }
+
+  register(client) {
+    if (client) {
+      this.activeClients.add(client);
+    }
+  }
+
+  unregister(client) {
+    if (client) {
+      this.activeClients.delete(client);
+    }
+  }
+
+  closeClient(client) {
+    if (!client) {
+      return false;
+    }
+    try {
+      client.close();
+    } catch (_error) {
+      // close 失败不影响后续流程。
+    }
+    this.unregister(client);
+    return true;
+  }
+
+  runExclusive(operation) {
+    const run = this.operationQueue.then(() => operation());
+    this.operationQueue = run.catch(() => {});
+    return run;
+  }
+
+  async suspendSyncConnectionIfNeeded() {
+    const syncService = this.syncServiceRef;
+    if (!syncService || !syncService.isRunning || !syncService.client) {
+      return false;
+    }
+    syncService.closeClientSafe();
+    return true;
+  }
+
+  async resumeSyncConnectionIfNeeded(wasSuspended) {
+    if (!wasSuspended) {
+      return;
+    }
+    const syncService = this.syncServiceRef;
+    if (!syncService || !syncService.isRunning || syncService.client) {
+      return;
+    }
+    await syncService.connectWithRetry("FTP 恢复连接");
+    syncService.log("info", "临时操作完成，监听 FTP 连接已恢复。");
+  }
+
+  forceDisconnectAll() {
+    let closedCount = 0;
+    for (const client of [...this.activeClients]) {
+      if (this.closeClient(client)) {
+        closedCount += 1;
+      }
+    }
+
+    let syncConnectionClosed = false;
+    let watcherStillRunning = false;
+    const syncService = this.syncServiceRef;
+    if (syncService) {
+      syncService.forceDisconnectFtp();
+      syncConnectionClosed = !syncService.client;
+      watcherStillRunning = Boolean(syncService.isRunning && syncService.watcher);
+    }
+
+    return {
+      closedCount,
+      syncConnectionClosed,
+      watcherStillRunning,
+    };
+  }
+}
+
+const ftpConnectionManager = new FtpConnectionManager();
+
 function parseIgnorePaths(value) {
   if (Array.isArray(value)) {
     return value.map((item) => String(item).trim()).filter(Boolean);
@@ -216,13 +315,13 @@ class FtpSyncService {
     if (!this.client) {
       return;
     }
-    try {
-      this.client.close();
-    } catch (_error) {
-      // close 失败不影响后续重连流程。
-    } finally {
-      this.client = null;
-    }
+    const closingClient = this.client;
+    this.client = null;
+    ftpConnectionManager.closeClient(closingClient);
+  }
+
+  forceDisconnectFtp() {
+    this.closeClientSafe();
   }
 
   async connectWithRetry(reasonLabel) {
@@ -231,6 +330,7 @@ class FtpSyncService {
       this.closeClientSafe();
       const client = new ftp.Client(0);
       this.attachClientHooks(client);
+      ftpConnectionManager.register(client);
       this.client = client;
 
       try {
@@ -253,14 +353,22 @@ class FtpSyncService {
           this.connectRetry.maxDelayMs,
           this.connectRetry.initialDelayMs * (2 ** attempt)
         );
+        const backoffMs = isTooManyConnectionsError(error)
+          ? Math.max(delayMs, TOO_MANY_CONNECTIONS_BACKOFF_MS * (attempt + 1))
+          : delayMs;
         this.log(
           "warn",
-          `${reasonLabel}失败（第 ${nextAttempt}/${this.connectRetry.maxRetries} 次）：${friendlyMessage}，${delayMs}ms 后重试。`
+          `${reasonLabel}失败（第 ${nextAttempt}/${this.connectRetry.maxRetries} 次）：${friendlyMessage}，${backoffMs}ms 后重试。`
         );
         if (isTooManyConnectionsError(error)) {
+          this.closeClientSafe();
           this.log("warn", "FTP 服务器返回 421/连接数过多，建议稍等后再试或减少并行同步实例。");
+          this.log(
+            "warn",
+            "若仍无法连接，请使用「断开 FTP 连接」释放本实例连接，或到服务器面板清理会话。"
+          );
         }
-        await sleep(delayMs);
+        await sleep(backoffMs);
       }
     }
 
@@ -296,6 +404,9 @@ class FtpSyncService {
         "warn",
         `${operationName}遇到连接异常：${friendlyMessage}，将关闭旧连接后重连并重试一次。`
       );
+      if (isTooManyConnectionsError(error)) {
+        this.closeClientSafe();
+      }
       await this.reconnectWithLock(friendlyMessage);
       return handler();
     }
@@ -376,8 +487,20 @@ class FtpSyncService {
   }
 
   async processQueue(queue) {
-    if (!this.isRunning || !this.client) {
+    if (!this.isRunning) {
       return;
+    }
+
+    if (!this.client) {
+      try {
+        await this.reconnectWithLock("监听同步恢复连接");
+      } catch (error) {
+        this.log(
+          "error",
+          `监听同步恢复 FTP 连接失败: ${formatFriendlyConnectError(error)}`
+        );
+        return;
+      }
     }
 
     const pending = queue.filter((item) => !this.ignoreChecker(item.filePath));
@@ -439,45 +562,50 @@ async function listRemoteDirWithConfig(config, targetPath, options = {}) {
     throw new Error("请先完善 FTP 配置（主机、用户名）");
   }
 
-  const client = new ftp.Client(0);
-  client.ftp.verbose = false;
-  const basePath = (config.remoteBasePath || "/").replace(/\\/g, "/");
-  const normalizedBasePath = basePath.startsWith("/") ? basePath : `/${basePath}`;
-  const currentPath = (targetPath || normalizedBasePath || "/").replace(/\\/g, "/");
+  return ftpConnectionManager.runExclusive(async () => {
+    const suspendedSync = await ftpConnectionManager.suspendSyncConnectionIfNeeded();
+    const client = new ftp.Client(0);
+    client.ftp.verbose = false;
+    ftpConnectionManager.register(client);
+    const basePath = (config.remoteBasePath || "/").replace(/\\/g, "/");
+    const normalizedBasePath = basePath.startsWith("/") ? basePath : `/${basePath}`;
+    const currentPath = (targetPath || normalizedBasePath || "/").replace(/\\/g, "/");
 
-  try {
-    await accessClientWithRetry(client, config, {
-      onRetry: ({ attempt, total, delayMs, error }) => {
-        if (typeof options?.onLog === "function") {
-          options.onLog(
-            "warn",
-            `列目录连接重试（第 ${attempt}/${total} 次）：${formatFriendlyConnectError(error)}，${delayMs}ms 后重试。`
-          );
-        }
-      },
-    });
+    try {
+      await accessClientWithRetry(client, config, {
+        onRetry: ({ attempt, total, delayMs, error }) => {
+          if (typeof options?.onLog === "function") {
+            options.onLog(
+              "warn",
+              `列目录连接重试（第 ${attempt}/${total} 次）：${formatFriendlyConnectError(error)}，${delayMs}ms 后重试。`
+            );
+          }
+        },
+      });
 
-    const list = await client.list(currentPath);
-    const items = list.map((item) => ({
-      name: item.name,
-      type: item.isDirectory ? "dir" : "file",
-      path:
-        currentPath === "/"
-          ? `/${item.name}`
-          : `${currentPath.replace(/\/$/, "")}/${item.name}`,
-    }));
+      const list = await client.list(currentPath);
+      const items = list.map((item) => ({
+        name: item.name,
+        type: item.isDirectory ? "dir" : "file",
+        path:
+          currentPath === "/"
+            ? `/${item.name}`
+            : `${currentPath.replace(/\/$/, "")}/${item.name}`,
+      }));
 
-    const parentPath =
-      currentPath === "/" ? null : currentPath.replace(/\/[^/]+\/?$/, "") || "/";
+      const parentPath =
+        currentPath === "/" ? null : currentPath.replace(/\/[^/]+\/?$/, "") || "/";
 
-    return {
-      path: currentPath,
-      parentPath,
-      items,
-    };
-  } finally {
-    client.close();
-  }
+      return {
+        path: currentPath,
+        parentPath,
+        items,
+      };
+    } finally {
+      ftpConnectionManager.closeClient(client);
+      await ftpConnectionManager.resumeSyncConnectionIfNeeded(suspendedSync);
+    }
+  });
 }
 
 function normalizeRelativeUnixPath(relativePath) {
@@ -583,20 +711,31 @@ function remotePathToLocal(projectPath, remoteBasePath, remotePath) {
     : path.resolve(projectPath);
 }
 
-async function withFtpClient(config, handler) {
+async function withFtpClient(config, handler, options = {}) {
   if (!config || !config.host || !config.username) {
     throw new Error("请先完善 FTP 配置（主机、用户名）。");
   }
 
-  const client = new ftp.Client(0);
-  client.ftp.verbose = false;
+  return ftpConnectionManager.runExclusive(async () => {
+    const suspendedSync = await ftpConnectionManager.suspendSyncConnectionIfNeeded();
+    const client = new ftp.Client(0);
+    client.ftp.verbose = false;
+    ftpConnectionManager.register(client);
 
-  try {
-    await accessClientWithRetry(client, config);
-    return await handler(client);
-  } finally {
-    client.close();
-  }
+    try {
+      await accessClientWithRetry(client, config, {
+        onRetry: (payload) => {
+          if (typeof options.onRetry === "function") {
+            options.onRetry(payload);
+          }
+        },
+      });
+      return await handler(client);
+    } finally {
+      ftpConnectionManager.closeClient(client);
+      await ftpConnectionManager.resumeSyncConnectionIfNeeded(suspendedSync);
+    }
+  });
 }
 
 async function ensureRemoteParentDir(client, remotePath) {
@@ -802,8 +941,21 @@ async function syncLocalToServerByRemotePath({
   });
 }
 
+function setActiveSyncService(service) {
+  ftpConnectionManager.setSyncService(service);
+}
+
+function clearActiveSyncService(service) {
+  ftpConnectionManager.clearSyncService(service);
+}
+
+function forceDisconnectAll() {
+  return ftpConnectionManager.forceDisconnectAll();
+}
+
 module.exports = {
   FtpSyncService,
+  FtpConnectionManager,
   listRemoteDirWithConfig,
   syncLocalToRemote,
   syncRemoteToLocal,
@@ -816,6 +968,9 @@ module.exports = {
   buildProjectLocalPath,
   gitOutputToProjectRelative,
   localPathToRemote,
+  setActiveSyncService,
+  clearActiveSyncService,
+  forceDisconnectAll,
   DEFAULT_IGNORES,
   DEFAULT_IGNORE_SEGMENTS,
 };

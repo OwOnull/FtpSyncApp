@@ -13,6 +13,8 @@ const state = {
   logDrawerOpen: false,
   isResizingLogDrawer: false,
   isDraggingLogTrigger: false,
+  selectedExtractGitRef: "",
+  selectedExtractGitLabel: "",
 };
 
 const el = {
@@ -34,8 +36,21 @@ const el = {
   btnSaveConfig: document.getElementById("btnSaveConfig"),
   btnStartSync: document.getElementById("btnStartSync"),
   btnStopSync: document.getElementById("btnStopSync"),
+  btnDisconnectFtp: document.getElementById("btnDisconnectFtp"),
+  disconnectFtpDialog: document.getElementById("disconnectFtpDialog"),
+  disconnectFtpContent: document.getElementById("disconnectFtpContent"),
+  btnCloseDisconnectFtp: document.getElementById("btnCloseDisconnectFtp"),
+  btnCancelDisconnectFtp: document.getElementById("btnCancelDisconnectFtp"),
+  btnConfirmDisconnectFtp: document.getElementById("btnConfirmDisconnectFtp"),
   btnSyncGitUnstaged: document.getElementById("btnSyncGitUnstaged"),
-  btnExtractGitUnstaged: document.getElementById("btnExtractGitUnstaged"),
+  btnExtractGitSinceRef: document.getElementById("btnExtractGitSinceRef"),
+  extractGitSinceRefDialog: document.getElementById("extractGitSinceRefDialog"),
+  extractGitSinceRefContent: document.getElementById("extractGitSinceRefContent"),
+  extractGitSinceRefList: document.getElementById("extractGitSinceRefList"),
+  extractGitSinceRefEmpty: document.getElementById("extractGitSinceRefEmpty"),
+  btnCloseExtractGitSinceRef: document.getElementById("btnCloseExtractGitSinceRef"),
+  btnCancelExtractGitSinceRef: document.getElementById("btnCancelExtractGitSinceRef"),
+  btnConfirmExtractGitSinceRef: document.getElementById("btnConfirmExtractGitSinceRef"),
   logs: document.getElementById("logs"),
   logDrawer: document.getElementById("logDrawer"),
   btnToggleLogs: document.getElementById("btnToggleLogs"),
@@ -295,6 +310,148 @@ function closeProjectHistoryDialog() {
   }
 }
 
+function openDisconnectFtpDialog() {
+  if (!el.disconnectFtpDialog.open) {
+    el.disconnectFtpDialog.showModal();
+  }
+}
+
+function closeDisconnectFtpDialog() {
+  if (el.disconnectFtpDialog.open) {
+    el.disconnectFtpDialog.close();
+  }
+}
+
+async function confirmDisconnectFtp() {
+  closeDisconnectFtpDialog();
+  appendLog("info", "正在断开本实例所有 FTP 连接…");
+  const result = await window.appApi.forceDisconnectFtp();
+  if (!result || !result.ok) {
+    appendLog("error", (result && result.message) || "断开 FTP 连接失败。");
+    return;
+  }
+  appendLog("info", (result && result.message) || "FTP 连接已断开。");
+}
+
+function setExtractGitRefSelection(ref, label) {
+  state.selectedExtractGitRef = String(ref || "");
+  state.selectedExtractGitLabel = String(label || "");
+  el.btnConfirmExtractGitSinceRef.disabled = !state.selectedExtractGitRef;
+
+  const buttons = el.extractGitSinceRefList.querySelectorAll(".extract-git-ref-item");
+  buttons.forEach((button) => {
+    const selected = button.dataset.ref === state.selectedExtractGitRef;
+    button.classList.toggle("is-selected", selected);
+    button.setAttribute("aria-selected", selected ? "true" : "false");
+  });
+}
+
+function renderExtractGitRefOptions(options) {
+  const list = Array.isArray(options) ? options : [];
+  el.extractGitSinceRefList.innerHTML = "";
+  const isEmpty = list.length === 0;
+  el.extractGitSinceRefEmpty.classList.toggle("hidden", !isEmpty);
+  el.extractGitSinceRefList.classList.toggle("hidden", isEmpty);
+  if (isEmpty) {
+    el.extractGitSinceRefEmpty.textContent = "暂无可选项。";
+    setExtractGitRefSelection("", "");
+    return;
+  }
+
+  list.forEach((option) => {
+    const li = document.createElement("li");
+    li.className = "project-history-row extract-git-ref-row";
+
+    const chooseButton = document.createElement("button");
+    chooseButton.type = "button";
+    chooseButton.className = "project-history-item extract-git-ref-item";
+    chooseButton.dataset.ref = option.ref;
+    chooseButton.setAttribute("role", "option");
+    chooseButton.setAttribute("aria-selected", "false");
+
+    const isPseudo = option.type === "pseudo" || option.kind === "pseudo";
+    if (isPseudo) {
+      chooseButton.classList.add("extract-git-ref-pseudo");
+    }
+
+    const meta = document.createElement("span");
+    meta.className = "extract-git-ref-meta";
+    const message = document.createElement("span");
+    message.className = "extract-git-ref-message";
+
+    if (isPseudo) {
+      meta.textContent = option.title || option.ref;
+      message.textContent =
+        option.subtitle || option.message || "工作区相关变更";
+    } else {
+      meta.textContent = [option.shortHash, option.date, option.author]
+        .filter(Boolean)
+        .join("  ·  ");
+      message.textContent = option.subject || option.message || "";
+    }
+
+    chooseButton.title =
+      option.label ||
+      [meta.textContent, message.textContent].filter(Boolean).join(" — ");
+    chooseButton.appendChild(meta);
+    chooseButton.appendChild(message);
+
+    chooseButton.addEventListener("click", () => {
+      const labelText = isPseudo
+        ? option.title || option.ref
+        : option.label ||
+          [option.shortHash, option.date, option.author, option.subject || option.message]
+            .filter(Boolean)
+            .join("  ");
+      setExtractGitRefSelection(option.ref, labelText);
+    });
+
+    li.appendChild(chooseButton);
+    el.extractGitSinceRefList.appendChild(li);
+  });
+
+  setExtractGitRefSelection("", "");
+}
+
+async function openExtractGitSinceRefDialog() {
+  if (!state.projectPath) {
+    appendLog("warn", "请先选择项目目录。");
+    return;
+  }
+
+  setExtractGitRefSelection("", "");
+  el.extractGitSinceRefList.innerHTML = "";
+  el.extractGitSinceRefList.classList.add("hidden");
+  el.extractGitSinceRefEmpty.classList.remove("hidden");
+  el.extractGitSinceRefEmpty.textContent = "正在读取 Git 选项…";
+  el.btnConfirmExtractGitSinceRef.disabled = true;
+
+  if (!el.extractGitSinceRefDialog.open) {
+    el.extractGitSinceRefDialog.showModal();
+  }
+
+  const result = await window.appApi.listGitExtractOptions({
+    projectPath: state.projectPath,
+  });
+
+  if (!result.ok) {
+    el.extractGitSinceRefEmpty.textContent = result.message || "读取 Git 选项失败。";
+    el.extractGitSinceRefEmpty.classList.remove("hidden");
+    el.extractGitSinceRefList.classList.add("hidden");
+    appendLog("error", result.message || "读取 Git 选项失败。");
+    return;
+  }
+
+  renderExtractGitRefOptions(result.options || []);
+}
+
+function closeExtractGitSinceRefDialog() {
+  if (el.extractGitSinceRefDialog.open) {
+    el.extractGitSinceRefDialog.close();
+  }
+  setExtractGitRefSelection("", "");
+}
+
 function renderProjectHistory(history) {
   const list = Array.isArray(history) ? history : [];
   el.projectHistoryList.innerHTML = "";
@@ -534,23 +691,34 @@ async function stopSync() {
   appendLog("info", "同步已停止。");
 }
 
-async function extractGitUnstaged() {
+async function confirmExtractGitSinceRef() {
   if (!state.projectPath) {
     appendLog("warn", "请先选择项目目录。");
+    closeExtractGitSinceRefDialog();
     return;
   }
 
+  const ref = String(state.selectedExtractGitRef || "").trim();
+  if (!ref) {
+    appendLog("warn", "请先选择要提取的 Git 选项。");
+    return;
+  }
+
+  const label = state.selectedExtractGitLabel || ref;
+  closeExtractGitSinceRefDialog();
   openLogDrawer();
-  appendLog("info", "正在收集 Git 未暂存变更…");
-  el.btnExtractGitUnstaged.disabled = true;
+  appendLog("info", `正在收集「${label}」相关的 Git 变更…`);
+  el.btnExtractGitSinceRef.disabled = true;
+  el.btnConfirmExtractGitSinceRef.disabled = true;
 
   try {
-    const result = await window.appApi.extractGitUnstaged({
+    const result = await window.appApi.extractGitSinceRef({
       projectPath: state.projectPath,
+      ref,
     });
 
     if (!result.ok && result.code) {
-      appendLog("error", result.message || "提取 Git 未暂存的变更失败。");
+      appendLog("error", result.message || "提取 Git 变更失败。");
       return;
     }
 
@@ -564,7 +732,7 @@ async function extractGitUnstaged() {
       return;
     }
 
-    appendLog("info", result.message || "Git 未暂存的变更提取完成。");
+    appendLog("info", result.message || "Git 变更提取完成。");
     if (result.failed && result.failed.length) {
       result.failed.forEach((item) => {
         appendLog(
@@ -574,7 +742,8 @@ async function extractGitUnstaged() {
       });
     }
   } finally {
-    el.btnExtractGitUnstaged.disabled = false;
+    el.btnExtractGitSinceRef.disabled = false;
+    el.btnConfirmExtractGitSinceRef.disabled = true;
   }
 }
 
@@ -741,8 +910,9 @@ function bindEvents() {
   el.btnSaveConfig.addEventListener("click", saveConfig);
   el.btnStartSync.addEventListener("click", startSync);
   el.btnStopSync.addEventListener("click", stopSync);
+  el.btnDisconnectFtp.addEventListener("click", openDisconnectFtpDialog);
   el.btnSyncGitUnstaged.addEventListener("click", syncGitUnstaged);
-  el.btnExtractGitUnstaged.addEventListener("click", extractGitUnstaged);
+  el.btnExtractGitSinceRef.addEventListener("click", openExtractGitSinceRefDialog);
   el.btnClearLogs.addEventListener("click", clearLogs);
   el.btnRefreshLocal.addEventListener("click", () => refreshLocalDir());
   el.btnLocalUp.addEventListener("click", () =>
@@ -825,6 +995,24 @@ function bindEvents() {
   el.btnCloseProjectHistory.addEventListener("click", () => {
     closeProjectHistoryDialog();
   });
+  el.btnCloseDisconnectFtp.addEventListener("click", () => {
+    closeDisconnectFtpDialog();
+  });
+  el.btnCancelDisconnectFtp.addEventListener("click", () => {
+    closeDisconnectFtpDialog();
+  });
+  el.btnConfirmDisconnectFtp.addEventListener("click", () => {
+    confirmDisconnectFtp();
+  });
+  el.btnCloseExtractGitSinceRef.addEventListener("click", () => {
+    closeExtractGitSinceRefDialog();
+  });
+  el.btnCancelExtractGitSinceRef.addEventListener("click", () => {
+    closeExtractGitSinceRefDialog();
+  });
+  el.btnConfirmExtractGitSinceRef.addEventListener("click", () => {
+    confirmExtractGitSinceRef();
+  });
   el.projectHistoryDialog.addEventListener("click", (event) => {
     if (!el.projectHistoryDialog.open || event.target !== el.projectHistoryDialog) {
       return;
@@ -837,6 +1025,34 @@ function bindEvents() {
       event.clientY > contentRect.bottom;
     if (isOutsideContent) {
       closeProjectHistoryDialog();
+    }
+  });
+  el.disconnectFtpDialog.addEventListener("click", (event) => {
+    if (!el.disconnectFtpDialog.open || event.target !== el.disconnectFtpDialog) {
+      return;
+    }
+    const contentRect = el.disconnectFtpContent.getBoundingClientRect();
+    const isOutsideContent =
+      event.clientX < contentRect.left ||
+      event.clientX > contentRect.right ||
+      event.clientY < contentRect.top ||
+      event.clientY > contentRect.bottom;
+    if (isOutsideContent) {
+      closeDisconnectFtpDialog();
+    }
+  });
+  el.extractGitSinceRefDialog.addEventListener("click", (event) => {
+    if (!el.extractGitSinceRefDialog.open || event.target !== el.extractGitSinceRefDialog) {
+      return;
+    }
+    const contentRect = el.extractGitSinceRefContent.getBoundingClientRect();
+    const isOutsideContent =
+      event.clientX < contentRect.left ||
+      event.clientX > contentRect.right ||
+      event.clientY < contentRect.top ||
+      event.clientY > contentRect.bottom;
+    if (isOutsideContent) {
+      closeExtractGitSinceRefDialog();
     }
   });
 }
