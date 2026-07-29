@@ -7,9 +7,12 @@ const LOG_DRAG_ACTIVATE_DISTANCE = 12;
 
 const state = {
   projectPath: "",
+  projectAlias: "",
   localPath: "",
   remotePath: "",
   contextTarget: null,
+  historyContextTarget: null,
+  aliasDialogProjectPath: "",
   logDrawerOpen: false,
   isResizingLogDrawer: false,
   isDraggingLogTrigger: false,
@@ -18,6 +21,7 @@ const state = {
 };
 
 const el = {
+  projectTitle: document.getElementById("projectTitle"),
   projectPath: document.getElementById("projectPath"),
   type: document.getElementById("type"),
   host: document.getElementById("host"),
@@ -33,6 +37,18 @@ const el = {
   projectHistoryList: document.getElementById("projectHistoryList"),
   projectHistoryEmpty: document.getElementById("projectHistoryEmpty"),
   btnCloseProjectHistory: document.getElementById("btnCloseProjectHistory"),
+  projectHistoryContextMenu: document.getElementById("projectHistoryContextMenu"),
+  historySetAlias: document.querySelector('#projectHistoryContextMenu [data-action="set-alias"]'),
+  historyOpenInExplorer: document.querySelector(
+    '#projectHistoryContextMenu [data-action="open-in-explorer"]'
+  ),
+  projectAliasDialog: document.getElementById("projectAliasDialog"),
+  projectAliasContent: document.getElementById("projectAliasContent"),
+  projectAliasPathHint: document.getElementById("projectAliasPathHint"),
+  projectAliasInput: document.getElementById("projectAliasInput"),
+  btnCloseProjectAlias: document.getElementById("btnCloseProjectAlias"),
+  btnCancelProjectAlias: document.getElementById("btnCancelProjectAlias"),
+  btnConfirmProjectAlias: document.getElementById("btnConfirmProjectAlias"),
   btnSaveConfig: document.getElementById("btnSaveConfig"),
   btnStartSync: document.getElementById("btnStartSync"),
   btnStopSync: document.getElementById("btnStopSync"),
@@ -288,15 +304,30 @@ function setFormConfig(config) {
   el.ignorePaths.value = formatIgnorePathsForTextarea(c.ignorePaths);
 }
 
-function setProjectPath(projectPath) {
+function formatProjectAlias(alias) {
+  const text = String(alias || "").trim();
+  return text || "暂无别名";
+}
+
+function updateProjectTitle(alias) {
+  state.projectAlias = String(alias || "").trim();
+  el.projectTitle.textContent = formatProjectAlias(state.projectAlias);
+}
+
+function setProjectPath(projectPath, alias) {
   state.projectPath = projectPath || "";
   state.localPath = state.projectPath;
   el.projectPath.textContent = state.projectPath || "-";
+  if (alias !== undefined) {
+    updateProjectTitle(alias);
+  }
 }
 
 async function chooseProjectFromHistory() {
   const list = await window.appApi.listProjectHistory();
-  const history = Array.isArray(list) ? list.filter((item) => item && item.projectPath) : [];
+  const history = Array.isArray(list)
+    ? list.filter((item) => item && (item.projectPath || item.path))
+    : [];
   renderProjectHistory(history);
 
   if (!el.projectHistoryDialog.open) {
@@ -305,6 +336,7 @@ async function chooseProjectFromHistory() {
 }
 
 function closeProjectHistoryDialog() {
+  hideProjectHistoryContextMenu();
   if (el.projectHistoryDialog.open) {
     el.projectHistoryDialog.close();
   }
@@ -464,17 +496,47 @@ function renderProjectHistory(history) {
   }
 
   list.forEach((item) => {
+    const projectPath = item.projectPath || item.path || "";
+    const alias = (item.alias || (item.config && item.config.alias) || "").trim();
+    const displayAlias = formatProjectAlias(alias);
+
     const li = document.createElement("li");
     li.className = "project-history-row";
 
     const chooseButton = document.createElement("button");
     chooseButton.type = "button";
     chooseButton.className = "project-history-item";
-    chooseButton.textContent = item.projectPath;
-    chooseButton.title = item.projectPath;
+    chooseButton.title = projectPath;
+
+    const aliasEl = document.createElement("span");
+    aliasEl.className = `project-history-alias${alias ? "" : " is-empty"}`;
+    aliasEl.textContent = displayAlias;
+
+    const pathEl = document.createElement("span");
+    pathEl.className = "project-history-path";
+    pathEl.textContent = projectPath;
+
+    chooseButton.appendChild(aliasEl);
+    chooseButton.appendChild(pathEl);
     chooseButton.addEventListener("click", async () => {
-      await applySelectedProject(item, { logMessage: "已加载历史项目" });
+      await applySelectedProject(
+        {
+          projectPath,
+          alias,
+          config: item.config,
+        },
+        { logMessage: "已加载历史项目" }
+      );
       closeProjectHistoryDialog();
+    });
+    chooseButton.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      showProjectHistoryContextMenu(event, {
+        projectPath,
+        alias,
+        config: item.config,
+      });
     });
 
     const deleteButton = document.createElement("button");
@@ -485,15 +547,17 @@ function renderProjectHistory(history) {
       event.preventDefault();
       event.stopPropagation();
       const result = await window.appApi.deleteProjectHistoryItem({
-        projectPath: item.projectPath,
+        projectPath,
       });
       if (!result || !result.ok) {
         appendLog("error", (result && result.message) || "删除历史项目失败。");
         return;
       }
-      appendLog("info", `已删除历史项目: ${item.projectPath}`);
+      appendLog("info", `已删除历史项目: ${projectPath}`);
       const updated = await window.appApi.listProjectHistory();
-      const nextHistory = Array.isArray(updated) ? updated.filter((entry) => entry && entry.projectPath) : [];
+      const nextHistory = Array.isArray(updated)
+        ? updated.filter((entry) => entry && (entry.projectPath || entry.path))
+        : [];
       renderProjectHistory(nextHistory);
     });
 
@@ -503,13 +567,106 @@ function renderProjectHistory(history) {
   });
 }
 
+function hideProjectHistoryContextMenu() {
+  state.historyContextTarget = null;
+  el.projectHistoryContextMenu.classList.add("hidden");
+}
+
+function showProjectHistoryContextMenu(event, item) {
+  hideContextMenu();
+  state.historyContextTarget = item;
+  el.projectHistoryContextMenu.classList.remove("hidden");
+  const menuWidth = el.projectHistoryContextMenu.offsetWidth || 180;
+  const menuHeight = el.projectHistoryContextMenu.offsetHeight || 80;
+  const left = Math.min(event.clientX, window.innerWidth - menuWidth - 8);
+  const top = Math.min(event.clientY, window.innerHeight - menuHeight - 8);
+  el.projectHistoryContextMenu.style.left = `${Math.max(8, left)}px`;
+  el.projectHistoryContextMenu.style.top = `${Math.max(8, top)}px`;
+}
+
+function closeProjectAliasDialog() {
+  state.aliasDialogProjectPath = "";
+  if (el.projectAliasDialog.open) {
+    el.projectAliasDialog.close();
+  }
+}
+
+function openProjectAliasDialog(item) {
+  if (!item || !item.projectPath) {
+    return;
+  }
+  hideProjectHistoryContextMenu();
+  state.aliasDialogProjectPath = item.projectPath;
+  el.projectAliasPathHint.textContent = item.projectPath;
+  el.projectAliasInput.value = item.alias || "";
+  if (!el.projectAliasDialog.open) {
+    el.projectAliasDialog.showModal();
+  }
+  requestAnimationFrame(() => {
+    el.projectAliasInput.focus();
+    el.projectAliasInput.select();
+  });
+}
+
+async function confirmProjectAlias() {
+  const projectPath = state.aliasDialogProjectPath;
+  if (!projectPath) {
+    closeProjectAliasDialog();
+    return;
+  }
+  const alias = el.projectAliasInput.value.trim();
+  const result = await window.appApi.setProjectAlias({
+    projectPath,
+    alias,
+  });
+  if (!result || !result.ok) {
+    appendLog("error", (result && result.message) || "设置别名失败。");
+    return;
+  }
+
+  const savedAlias = result.alias || "";
+  appendLog("info", savedAlias ? `已设置别名: ${savedAlias}` : "已清除项目别名。");
+  closeProjectAliasDialog();
+
+  if (state.projectPath && state.projectPath === projectPath) {
+    updateProjectTitle(savedAlias);
+  }
+
+  if (el.projectHistoryDialog.open) {
+    const updated = await window.appApi.listProjectHistory();
+    const nextHistory = Array.isArray(updated)
+      ? updated.filter((entry) => entry && (entry.projectPath || entry.path))
+      : [];
+    renderProjectHistory(nextHistory);
+  }
+}
+
+async function openHistoryProjectInExplorer(item) {
+  hideProjectHistoryContextMenu();
+  if (!item || !item.projectPath) {
+    return;
+  }
+  const result = await window.appApi.openProjectInExplorer({
+    projectPath: item.projectPath,
+  });
+  if (!result || !result.ok) {
+    appendLog("error", (result && result.message) || "打开资源管理器失败。");
+  }
+}
+
 async function applySelectedProject(selected, options) {
   if (!selected || !selected.projectPath) {
     appendLog("warn", "历史项目数据无效。");
     return;
   }
   const logMessage = options?.logMessage;
-  setProjectPath(selected.projectPath);
+  const alias =
+    selected.alias != null
+      ? selected.alias
+      : selected.config && selected.config.alias
+        ? selected.config.alias
+        : "";
+  setProjectPath(selected.projectPath, alias);
   setFormConfig(selected.config);
   if (logMessage) {
     appendLog("info", `${logMessage}: ${selected.projectPath}`);
@@ -528,7 +685,13 @@ function hideContextMenu() {
   el.contextMenu.classList.add("hidden");
 }
 
+function hideAllContextMenus() {
+  hideContextMenu();
+  hideProjectHistoryContextMenu();
+}
+
 function showContextMenu(event, item, panel) {
+  hideProjectHistoryContextMenu();
   state.contextTarget = { item, panel };
   const isLocal = panel === "local";
   el.contextSyncToServer.classList.toggle("hidden", !isLocal);
@@ -977,23 +1140,59 @@ function bindEvents() {
     await syncItemFromLocal(target.item);
   });
 
+  el.historySetAlias.addEventListener("click", () => {
+    const target = state.historyContextTarget;
+    hideProjectHistoryContextMenu();
+    if (!target) {
+      return;
+    }
+    openProjectAliasDialog(target);
+  });
+
+  el.historyOpenInExplorer.addEventListener("click", async () => {
+    const target = state.historyContextTarget;
+    await openHistoryProjectInExplorer(target);
+  });
+
   document.addEventListener("click", (event) => {
     if (!el.contextMenu.contains(event.target)) {
       hideContextMenu();
+    }
+    if (!el.projectHistoryContextMenu.contains(event.target)) {
+      hideProjectHistoryContextMenu();
     }
   });
 
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
-      hideContextMenu();
+      hideAllContextMenus();
     }
   });
 
-  window.addEventListener("blur", hideContextMenu);
-  window.addEventListener("resize", hideContextMenu);
-  window.addEventListener("scroll", hideContextMenu, true);
+  window.addEventListener("blur", hideAllContextMenus);
+  window.addEventListener("resize", hideAllContextMenus);
+  window.addEventListener("scroll", hideAllContextMenus, true);
   el.btnCloseProjectHistory.addEventListener("click", () => {
+    hideProjectHistoryContextMenu();
     closeProjectHistoryDialog();
+  });
+  el.btnCloseProjectAlias.addEventListener("click", () => {
+    closeProjectAliasDialog();
+  });
+  el.btnCancelProjectAlias.addEventListener("click", () => {
+    closeProjectAliasDialog();
+  });
+  el.btnConfirmProjectAlias.addEventListener("click", () => {
+    confirmProjectAlias();
+  });
+  el.projectAliasInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      confirmProjectAlias();
+    }
+  });
+  el.projectAliasContent.addEventListener("submit", (event) => {
+    event.preventDefault();
   });
   el.btnCloseDisconnectFtp.addEventListener("click", () => {
     closeDisconnectFtpDialog();
@@ -1024,7 +1223,22 @@ function bindEvents() {
       event.clientY < contentRect.top ||
       event.clientY > contentRect.bottom;
     if (isOutsideContent) {
+      hideProjectHistoryContextMenu();
       closeProjectHistoryDialog();
+    }
+  });
+  el.projectAliasDialog.addEventListener("click", (event) => {
+    if (!el.projectAliasDialog.open || event.target !== el.projectAliasDialog) {
+      return;
+    }
+    const contentRect = el.projectAliasContent.getBoundingClientRect();
+    const isOutsideContent =
+      event.clientX < contentRect.left ||
+      event.clientX > contentRect.right ||
+      event.clientY < contentRect.top ||
+      event.clientY > contentRect.bottom;
+    if (isOutsideContent) {
+      closeProjectAliasDialog();
     }
   });
   el.disconnectFtpDialog.addEventListener("click", (event) => {
@@ -1066,6 +1280,7 @@ async function init() {
   el.btnRemoteUp.disabled = true;
   setPanelError(el.localError, "");
   setPanelError(el.remoteError, "");
+  updateProjectTitle("");
 
   const unlisten = window.appApi.onLog((item) => {
     appendLog(item.level || "info", item.message || "");
@@ -1078,6 +1293,7 @@ async function init() {
   if (last && last.projectPath) {
     await applySelectedProject({
       projectPath: last.projectPath,
+      alias: last.config && last.config.alias,
       config: last.config,
     }, { logMessage: "已自动加载上次项目" });
   } else {

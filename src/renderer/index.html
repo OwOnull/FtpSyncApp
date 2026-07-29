@@ -29,7 +29,7 @@
               <div class="config-scroll">
 
                 <div class="project-header">
-                  <h3>当前项目目录</h3>
+                  <h3 id="projectTitle">暂无别名</h3>
                   <div class="project-header-actions">
                     <button id="btnProjectHistory" class="secondary">历史项目</button>
                     <button id="btnChooseProject">选择项目</button>
@@ -244,6 +244,28 @@
         <div class="project-history-body">
           <div id="projectHistoryEmpty" class="project-history-empty hidden">暂无历史项目，请先手动选择项目。</div>
           <ul id="projectHistoryList" class="project-history-list"></ul>
+        </div>
+      </form>
+      <div id="projectHistoryContextMenu" class="context-menu hidden" role="menu">
+        <button type="button" data-action="set-alias" class="context-menu-item">设置别名</button>
+        <button type="button" data-action="open-in-explorer" class="context-menu-item">在资源管理器中打开</button>
+      </div>
+    </dialog>
+
+    <dialog id="projectAliasDialog" class="confirm-dialog project-history-dialog">
+      <form method="dialog" class="confirm-dialog-content project-history-content" id="projectAliasContent">
+        <div class="project-history-header">
+          <h3>设置别名</h3>
+          <button id="btnCloseProjectAlias" type="button" class="project-history-close" aria-label="关闭弹窗">×</button>
+        </div>
+        <div class="confirm-dialog-body">
+          <p id="projectAliasPathHint" class="confirm-dialog-hint project-alias-path-hint"></p>
+          <label class="date-field-label" for="projectAliasInput">项目别名</label>
+          <input id="projectAliasInput" class="date-field-input" type="text" maxlength="80" placeholder="输入别名，可留空清除" autocomplete="off" />
+        </div>
+        <div class="confirm-dialog-actions">
+          <button type="button" id="btnCancelProjectAlias" class="secondary">取消</button>
+          <button type="button" id="btnConfirmProjectAlias">保存</button>
         </div>
       </form>
     </dialog>

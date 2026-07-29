@@ -2,7 +2,7 @@ const path = require("path");
 const fs = require("fs/promises");
 const { execFile } = require("child_process");
 const { promisify } = require("util");
-const { app, BrowserWindow, dialog, ipcMain } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
 const { ConfigStore } = require("../store/config-store");
 const { ProjectLockManager } = require("./project-lock-manager");
 const {
@@ -479,10 +479,22 @@ async function collectGitChangesSinceRef(projectPath, ref) {
     ? shortHashResult.stdout.trim()
     : commitHash.slice(0, 7);
 
-  const diffResult = await execGit(
-    ["diff", "--name-only", commitHash],
+  // 使用 commitHash~1（父提交）作为 diff 基准，确保包含选中 commit 本身的变更
+  const parentResult = await execGit(
+    ["rev-parse", "--verify", `${commitHash}~1`],
     gitRootOptions
   );
+  // 父提交存在则以其为基准；否则（初始提交）使用空树哈希
+  const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf899d15363d7b90d";
+  const diffBase = parentResult.ok ? `${commitHash}~1` : EMPTY_TREE;
+  const diffCmd = ["diff", "--name-only", diffBase];
+
+  sendLog(
+    "info",
+    `执行: git ${diffCmd.join(" ")}（基准: ${parentResult.ok ? `${shortHash}~1` : "空树/初始提交"}）`
+  );
+
+  const diffResult = await execGit(diffCmd, gitRootOptions);
   if (!diffResult.ok) {
     return diffResult;
   }
@@ -508,7 +520,7 @@ async function collectGitChangesSinceRef(projectPath, ref) {
     gitRoot,
     skippedOutsideProject,
     ref: commitHash,
-    refLabel: `提交 ${shortHash}`,
+    refLabel: `提交 ${shortHash}（含）至工作区`,
     shortHash,
     extractMode: "copy_skip_missing",
   };
@@ -860,10 +872,51 @@ ipcMain.handle("project:list-history", async () => {
     }
   }
 
-  return ordered.map((projectPath) => ({
+  return ordered.map((projectPath) => {
+    const config = configStore.getProjectConfig(projectPath);
+    return {
+      path: projectPath,
+      projectPath,
+      alias: config.alias || "",
+      config,
+    };
+  });
+});
+
+ipcMain.handle("project:set-alias", async (_event, payload) => {
+  const rawProjectPath = payload && payload.projectPath ? String(payload.projectPath).trim() : "";
+  if (!rawProjectPath) {
+    return { ok: false, message: "未指定项目路径。" };
+  }
+  const projectPath = path.resolve(rawProjectPath);
+  const alias = payload && payload.alias != null ? String(payload.alias) : "";
+  configStore.setProjectAlias(projectPath, alias);
+  await configStore.flush();
+  return {
+    ok: true,
     projectPath,
-    config: configStore.getProjectConfig(projectPath),
-  }));
+    alias: configStore.getProjectConfig(projectPath).alias || "",
+  };
+});
+
+ipcMain.handle("project:open-in-explorer", async (_event, payload) => {
+  const rawProjectPath = payload && payload.projectPath ? String(payload.projectPath).trim() : "";
+  if (!rawProjectPath) {
+    return { ok: false, message: "未指定项目路径。" };
+  }
+  const projectPath = path.resolve(rawProjectPath);
+  try {
+    const errorMessage = await shell.openPath(projectPath);
+    if (errorMessage) {
+      return { ok: false, message: errorMessage };
+    }
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      message: error && error.message ? error.message : "打开资源管理器失败",
+    };
+  }
 });
 
 ipcMain.handle("project:delete-history-item", async (_event, payload) => {

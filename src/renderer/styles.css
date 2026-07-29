@@ -979,6 +979,14 @@ html[data-debug-log-layout="outline"] .logs {
 
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.2);
 
+  overflow: visible;
+
+}
+
+.project-history-dialog .context-menu {
+
+  z-index: 1100;
+
 }
 
 .project-history-dialog::backdrop {
@@ -1121,6 +1129,16 @@ html[data-debug-log-layout="outline"] .logs {
 
   flex: 1;
 
+  display: flex;
+
+  flex-direction: column;
+
+  align-items: stretch;
+
+  justify-content: center;
+
+  gap: 6px;
+
   border: none;
 
   background: transparent;
@@ -1131,13 +1149,63 @@ html[data-debug-log-layout="outline"] .logs {
 
   padding: 4px 6px;
 
-  min-height: 30px;
+  height: auto;
+
+  min-height: 44px;
+
+  overflow: hidden;
+
+  white-space: normal;
+
+}
+
+.project-history-alias {
+
+  display: block;
+
+  font-size: 14px;
+
+  font-weight: 600;
+
+  color: #1f2329;
 
   overflow: hidden;
 
   text-overflow: ellipsis;
 
   white-space: nowrap;
+
+}
+
+.project-history-alias.is-empty {
+
+  font-weight: 500;
+
+  color: #98a2b3;
+
+}
+
+.project-history-path {
+
+  display: block;
+
+  font-size: 12px;
+
+  color: #5b6470;
+
+  overflow: hidden;
+
+  text-overflow: ellipsis;
+
+  white-space: nowrap;
+
+}
+
+.project-alias-path-hint {
+
+  margin-bottom: 12px !important;
+
+  overflow-wrap: anywhere;
 
 }
 

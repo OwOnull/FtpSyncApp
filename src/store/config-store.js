@@ -55,10 +55,18 @@ class ConfigStore {
       password: stored.password || "",
       remoteBasePath: stored.remoteBasePath || "/",
       ignorePaths: normalizeIgnorePaths(stored.ignorePaths),
+      alias: typeof stored.alias === "string" ? stored.alias.trim() : "",
     };
   }
 
   setProjectConfig(projectPath, config) {
+    const existing = this.state.projects[projectPath] || {};
+    const nextAlias =
+      config && Object.prototype.hasOwnProperty.call(config, "alias")
+        ? String(config.alias || "").trim()
+        : typeof existing.alias === "string"
+          ? existing.alias.trim()
+          : "";
     this.state.projects[projectPath] = {
       type: config.type || "ftp",
       host: config.host || "",
@@ -67,11 +75,35 @@ class ConfigStore {
       password: config.password || "",
       remoteBasePath: config.remoteBasePath || "/",
       ignorePaths: normalizeIgnorePaths(config.ignorePaths),
+      alias: nextAlias,
     };
+  }
+
+  setProjectAlias(projectPath, alias) {
+    const targetPath = String(projectPath || "");
+    if (!targetPath) {
+      return false;
+    }
+    const existing = this.getProjectConfig(targetPath);
+    this.setProjectConfig(targetPath, {
+      ...existing,
+      alias: String(alias || "").trim(),
+    });
+    return true;
   }
 
   listProjectPaths() {
     return Object.keys(this.state.projects || {});
+  }
+
+  listProjectHistory() {
+    return this.listProjectPaths().map((projectPath) => {
+      const config = this.getProjectConfig(projectPath);
+      return {
+        path: projectPath,
+        alias: config.alias || "",
+      };
+    });
   }
 
   removeProject(projectPath) {
