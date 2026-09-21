@@ -12,6 +12,8 @@ const state = {
   remotePath: "",
   contextTarget: null,
   historyContextTarget: null,
+  historyDragSource: null,
+  historyDragMoved: false,
   aliasDialogProjectPath: "",
   logDrawerOpen: false,
   isResizingLogDrawer: false,
@@ -502,6 +504,22 @@ function renderProjectHistory(history) {
 
     const li = document.createElement("li");
     li.className = "project-history-row";
+    li.dataset.projectPath = projectPath;
+    li.draggable = false;
+
+    const dragHandle = document.createElement("button");
+    dragHandle.type = "button";
+    dragHandle.className = "project-history-drag-handle";
+    dragHandle.title = "拖拽排序";
+    dragHandle.setAttribute("aria-label", "拖拽排序");
+    dragHandle.innerHTML = '<span class="project-history-drag-grip" aria-hidden="true"></span>';
+    dragHandle.addEventListener("pointerdown", () => {
+      li.draggable = true;
+    });
+    dragHandle.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
 
     const chooseButton = document.createElement("button");
     chooseButton.type = "button";
@@ -519,6 +537,9 @@ function renderProjectHistory(history) {
     chooseButton.appendChild(aliasEl);
     chooseButton.appendChild(pathEl);
     chooseButton.addEventListener("click", async () => {
+      if (state.historyDragMoved) {
+        return;
+      }
       await applySelectedProject(
         {
           projectPath,
@@ -561,9 +582,98 @@ function renderProjectHistory(history) {
       renderProjectHistory(nextHistory);
     });
 
+    li.appendChild(dragHandle);
     li.appendChild(chooseButton);
     li.appendChild(deleteButton);
+    bindProjectHistoryRowDrag(li);
     el.projectHistoryList.appendChild(li);
+  });
+}
+
+function getProjectHistoryOrderFromDom() {
+  return Array.from(el.projectHistoryList.querySelectorAll(".project-history-row"))
+    .map((row) => row.dataset.projectPath || "")
+    .filter(Boolean);
+}
+
+function clearProjectHistoryDragState() {
+  state.historyDragSource = null;
+  state.historyDragMoved = false;
+  el.projectHistoryList
+    .querySelectorAll(".project-history-row.is-dragging, .project-history-row.drag-over")
+    .forEach((row) => {
+      row.classList.remove("is-dragging", "drag-over", "drag-over-before", "drag-over-after");
+    });
+}
+
+function bindProjectHistoryRowDrag(row) {
+  row.addEventListener("dragstart", (event) => {
+    hideProjectHistoryContextMenu();
+    state.historyDragSource = row;
+    state.historyDragMoved = false;
+    row.classList.add("is-dragging");
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", row.dataset.projectPath || "");
+    }
+  });
+
+  row.addEventListener("dragend", async () => {
+    row.draggable = false;
+    const moved = state.historyDragMoved;
+    clearProjectHistoryDragState();
+    if (!moved) {
+      return;
+    }
+    const order = getProjectHistoryOrderFromDom();
+    const result = await window.appApi.reorderProjectHistory({ order });
+    if (!result || !result.ok) {
+      appendLog("error", (result && result.message) || "保存历史项目排序失败。");
+      const updated = await window.appApi.listProjectHistory();
+      const nextHistory = Array.isArray(updated)
+        ? updated.filter((entry) => entry && (entry.projectPath || entry.path))
+        : [];
+      renderProjectHistory(nextHistory);
+      return;
+    }
+    appendLog("info", "已保存历史项目排序。");
+  });
+
+  row.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    if (!state.historyDragSource || state.historyDragSource === row) {
+      return;
+    }
+    const rect = row.getBoundingClientRect();
+    const before = event.clientY < rect.top + rect.height / 2;
+    row.classList.add("drag-over");
+    row.classList.toggle("drag-over-before", before);
+    row.classList.toggle("drag-over-after", !before);
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = "move";
+    }
+  });
+
+  row.addEventListener("dragleave", () => {
+    row.classList.remove("drag-over", "drag-over-before", "drag-over-after");
+  });
+
+  row.addEventListener("drop", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const source = state.historyDragSource;
+    row.classList.remove("drag-over", "drag-over-before", "drag-over-after");
+    if (!source || source === row) {
+      return;
+    }
+    const rect = row.getBoundingClientRect();
+    const before = event.clientY < rect.top + rect.height / 2;
+    if (before) {
+      el.projectHistoryList.insertBefore(source, row);
+    } else {
+      el.projectHistoryList.insertBefore(source, row.nextSibling);
+    }
+    state.historyDragMoved = true;
   });
 }
 

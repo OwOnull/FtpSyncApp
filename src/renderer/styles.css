@@ -1117,11 +1117,116 @@ html[data-debug-log-layout="outline"] .logs {
 
   border-bottom: 1px solid #f1f3f6;
 
+  position: relative;
+
 }
 
 .project-history-row:last-child {
 
   border-bottom: none;
+
+}
+
+.project-history-row.is-dragging {
+
+  opacity: 0.45;
+
+}
+
+.project-history-row.drag-over-before::before,
+.project-history-row.drag-over-after::after {
+
+  content: "";
+
+  position: absolute;
+
+  left: 8px;
+
+  right: 8px;
+
+  height: 2px;
+
+  background: #3b6fd9;
+
+  border-radius: 1px;
+
+  pointer-events: none;
+
+}
+
+.project-history-row.drag-over-before::before {
+
+  top: 0;
+
+}
+
+.project-history-row.drag-over-after::after {
+
+  bottom: 0;
+
+}
+
+.project-history-drag-handle {
+
+  flex: 0 0 auto;
+
+  width: 22px;
+
+  height: 36px;
+
+  min-width: 22px;
+
+  padding: 0;
+
+  border: none;
+
+  border-radius: 6px;
+
+  background: transparent;
+
+  color: #98a2b3;
+
+  cursor: grab;
+
+  display: inline-flex;
+
+  align-items: center;
+
+  justify-content: center;
+
+}
+
+.project-history-drag-handle:hover {
+
+  background: #eef3ff;
+
+  color: #5b6470;
+
+  opacity: 1;
+
+}
+
+.project-history-drag-handle:active {
+
+  cursor: grabbing;
+
+}
+
+.project-history-drag-grip {
+
+  width: 10px;
+
+  height: 14px;
+
+  background-image: radial-gradient(circle, currentColor 1.2px, transparent 1.4px);
+
+  background-size: 5px 5px;
+
+  background-position: 0 0;
+
+  background-repeat: repeat;
+
+  pointer-events: none;
 
 }
 

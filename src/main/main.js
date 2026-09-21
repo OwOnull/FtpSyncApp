@@ -852,27 +852,7 @@ ipcMain.handle("project:get-last", async () => {
 });
 
 ipcMain.handle("project:list-history", async () => {
-  const lastProjectPath = configStore.getLastProjectPath();
-  const projectPaths = configStore
-    .listProjectPaths()
-    .filter(Boolean)
-    .map((item) => path.resolve(item));
-  const unique = new Set();
-  const ordered = [];
-
-  if (lastProjectPath) {
-    const normalizedLast = path.resolve(lastProjectPath);
-    unique.add(normalizedLast);
-    ordered.push(normalizedLast);
-  }
-  for (const projectPath of projectPaths) {
-    if (!unique.has(projectPath)) {
-      unique.add(projectPath);
-      ordered.push(projectPath);
-    }
-  }
-
-  return ordered.map((projectPath) => {
+  return configStore.listProjectPaths().map((projectPath) => {
     const config = configStore.getProjectConfig(projectPath);
     return {
       path: projectPath,
@@ -881,6 +861,17 @@ ipcMain.handle("project:list-history", async () => {
       config,
     };
   });
+});
+
+ipcMain.handle("project:reorder-history", async (_event, payload) => {
+  const rawOrder = payload && Array.isArray(payload.order) ? payload.order : [];
+  const order = rawOrder.map((item) => String(item || "").trim()).filter(Boolean);
+  const nextOrder = configStore.reorderProjectHistory(order);
+  await configStore.flush();
+  return {
+    ok: true,
+    order: nextOrder,
+  };
 });
 
 ipcMain.handle("project:set-alias", async (_event, payload) => {

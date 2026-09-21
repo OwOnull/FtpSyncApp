@@ -14,6 +14,23 @@ function normalizeIgnorePaths(value) {
   return [];
 }
 
+function normalizeHistoryOrder(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const seen = new Set();
+  const ordered = [];
+  for (const item of value) {
+    const projectPath = String(item || "").trim();
+    if (!projectPath || seen.has(projectPath)) {
+      continue;
+    }
+    seen.add(projectPath);
+    ordered.push(projectPath);
+  }
+  return ordered;
+}
+
 class ConfigStore {
   constructor(userDataPath) {
     this.userDataPath = userDataPath;
@@ -21,6 +38,7 @@ class ConfigStore {
     this.state = {
       lastProjectPath: "",
       projects: {},
+      projectHistoryOrder: [],
     };
   }
 
@@ -31,10 +49,59 @@ class ConfigStore {
       if (parsed && typeof parsed === "object") {
         this.state.lastProjectPath = parsed.lastProjectPath || "";
         this.state.projects = parsed.projects || {};
+        const hadSavedOrder =
+          Array.isArray(parsed.projectHistoryOrder) && parsed.projectHistoryOrder.length > 0;
+        this.state.projectHistoryOrder = normalizeHistoryOrder(parsed.projectHistoryOrder);
+        this.ensureHistoryOrderCoversProjects();
+        if (!hadSavedOrder && this.state.lastProjectPath) {
+          const last = this.state.lastProjectPath;
+          this.state.projectHistoryOrder = [
+            last,
+            ...this.state.projectHistoryOrder.filter((item) => item !== last),
+          ];
+        }
       }
     } catch (_error) {
       // 配置文件不存在时使用默认值。
     }
+  }
+
+  ensureHistoryOrderCoversProjects() {
+    const known = new Set(Object.keys(this.state.projects || {}));
+    const last = this.state.lastProjectPath || "";
+    if (last) {
+      known.add(last);
+    }
+    const current = normalizeHistoryOrder(this.state.projectHistoryOrder).filter((projectPath) =>
+      known.has(projectPath)
+    );
+    const present = new Set(current);
+    for (const projectPath of known) {
+      if (!present.has(projectPath)) {
+        current.push(projectPath);
+        present.add(projectPath);
+      }
+    }
+    this.state.projectHistoryOrder = current;
+  }
+
+  ensureProjectInHistoryOrder(projectPath, { prepend = false } = {}) {
+    const targetPath = String(projectPath || "").trim();
+    if (!targetPath) {
+      return;
+    }
+    const order = normalizeHistoryOrder(this.state.projectHistoryOrder);
+    const index = order.indexOf(targetPath);
+    if (index >= 0) {
+      this.state.projectHistoryOrder = order;
+      return;
+    }
+    if (prepend) {
+      order.unshift(targetPath);
+    } else {
+      order.push(targetPath);
+    }
+    this.state.projectHistoryOrder = order;
   }
 
   getLastProjectPath() {
@@ -43,6 +110,9 @@ class ConfigStore {
 
   setLastProjectPath(projectPath) {
     this.state.lastProjectPath = projectPath || "";
+    if (this.state.lastProjectPath) {
+      this.ensureProjectInHistoryOrder(this.state.lastProjectPath, { prepend: true });
+    }
   }
 
   getProjectConfig(projectPath) {
@@ -67,6 +137,7 @@ class ConfigStore {
         : typeof existing.alias === "string"
           ? existing.alias.trim()
           : "";
+    const isNew = !Object.prototype.hasOwnProperty.call(this.state.projects, projectPath);
     this.state.projects[projectPath] = {
       type: config.type || "ftp",
       host: config.host || "",
@@ -77,6 +148,7 @@ class ConfigStore {
       ignorePaths: normalizeIgnorePaths(config.ignorePaths),
       alias: nextAlias,
     };
+    this.ensureProjectInHistoryOrder(projectPath, { prepend: isNew });
   }
 
   setProjectAlias(projectPath, alias) {
@@ -93,7 +165,29 @@ class ConfigStore {
   }
 
   listProjectPaths() {
-    return Object.keys(this.state.projects || {});
+    this.ensureHistoryOrderCoversProjects();
+    const known = new Set(Object.keys(this.state.projects || {}));
+    const last = this.state.lastProjectPath || "";
+    if (last) {
+      known.add(last);
+    }
+    const ordered = [];
+    const seen = new Set();
+    for (const projectPath of this.state.projectHistoryOrder) {
+      if (!known.has(projectPath) || seen.has(projectPath)) {
+        continue;
+      }
+      seen.add(projectPath);
+      ordered.push(projectPath);
+    }
+    for (const projectPath of known) {
+      if (seen.has(projectPath)) {
+        continue;
+      }
+      seen.add(projectPath);
+      ordered.push(projectPath);
+    }
+    return ordered;
   }
 
   listProjectHistory() {
@@ -104,6 +198,29 @@ class ConfigStore {
         alias: config.alias || "",
       };
     });
+  }
+
+  reorderProjectHistory(orderedPaths) {
+    const requested = normalizeHistoryOrder(orderedPaths);
+    const known = new Set(this.listProjectPaths());
+    const next = [];
+    const seen = new Set();
+    for (const projectPath of requested) {
+      if (!known.has(projectPath) || seen.has(projectPath)) {
+        continue;
+      }
+      seen.add(projectPath);
+      next.push(projectPath);
+    }
+    for (const projectPath of known) {
+      if (seen.has(projectPath)) {
+        continue;
+      }
+      seen.add(projectPath);
+      next.push(projectPath);
+    }
+    this.state.projectHistoryOrder = next;
+    return next.slice();
   }
 
   removeProject(projectPath) {
@@ -118,6 +235,9 @@ class ConfigStore {
     if (this.state.lastProjectPath === targetPath) {
       this.state.lastProjectPath = "";
     }
+    this.state.projectHistoryOrder = normalizeHistoryOrder(this.state.projectHistoryOrder).filter(
+      (item) => item !== targetPath
+    );
     return true;
   }
 

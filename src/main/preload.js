@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld("appApi", {
   chooseProject: () => ipcRenderer.invoke("project:choose"),
   listProjectHistory: () => ipcRenderer.invoke("project:list-history"),
   deleteProjectHistoryItem: (payload) => ipcRenderer.invoke("project:delete-history-item", payload),
+  reorderProjectHistory: (payload) => ipcRenderer.invoke("project:reorder-history", payload),
   setProjectAlias: (payload) => ipcRenderer.invoke("project:set-alias", payload),
   openProjectInExplorer: (payload) => ipcRenderer.invoke("project:open-in-explorer", payload),
   getLastProject: () => ipcRenderer.invoke("project:get-last"),
