@@ -14,6 +14,8 @@ const state = {
   historyContextTarget: null,
   historyDragSource: null,
   historyDragMoved: false,
+  dangerConfirmTimer: null,
+  dangerConfirmResolver: null,
   aliasDialogProjectPath: "",
   logDrawerOpen: false,
   isResizingLogDrawer: false,
@@ -30,6 +32,7 @@ const el = {
   port: document.getElementById("port"),
   username: document.getElementById("username"),
   password: document.getElementById("password"),
+  localBasePath: document.getElementById("localBasePath"),
   remoteBasePath: document.getElementById("remoteBasePath"),
   ignorePaths: document.getElementById("ignorePaths"),
   btnChooseProject: document.getElementById("btnChooseProject"),
@@ -88,6 +91,15 @@ const el = {
   contextSyncFromServer: document.querySelector('[data-action="sync-from-server"]'),
   contextSyncToLocal: document.querySelector('[data-action="sync-to-local"]'),
   contextSyncFromLocal: document.querySelector('[data-action="sync-from-local"]'),
+  contextDeleteItem: document.querySelector('#contextMenu [data-action="delete-item"]'),
+  dangerConfirmDialog: document.getElementById("dangerConfirmDialog"),
+  dangerConfirmContent: document.getElementById("dangerConfirmContent"),
+  dangerConfirmTitle: document.getElementById("dangerConfirmTitle"),
+  dangerConfirmMessage: document.getElementById("dangerConfirmMessage"),
+  dangerConfirmList: document.getElementById("dangerConfirmList"),
+  btnCloseDangerConfirm: document.getElementById("btnCloseDangerConfirm"),
+  btnCancelDangerConfirm: document.getElementById("btnCancelDangerConfirm"),
+  btnConfirmDangerConfirm: document.getElementById("btnConfirmDangerConfirm"),
 };
 
 function appendLog(level, message) {
@@ -290,6 +302,7 @@ function getFormConfig() {
     port: Number(el.port.value) || 21,
     username: el.username.value.trim(),
     password: el.password.value,
+    localBasePath: el.localBasePath.value.trim(),
     remoteBasePath: el.remoteBasePath.value.trim() || "/",
     ignorePaths: parseIgnorePathsText(el.ignorePaths.value),
   };
@@ -302,8 +315,34 @@ function setFormConfig(config) {
   el.port.value = c.port || 21;
   el.username.value = c.username || "";
   el.password.value = c.password || "";
+  el.localBasePath.value = c.localBasePath || "";
   el.remoteBasePath.value = c.remoteBasePath || "/";
   el.ignorePaths.value = formatIgnorePathsForTextarea(c.ignorePaths);
+}
+
+function resolveLocalSyncRootInRenderer(projectPath, localBasePath) {
+  const root = String(projectPath || "").trim();
+  if (!root) {
+    return "";
+  }
+  const relative = String(localBasePath || "")
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\.\/+/, "")
+    .replace(/\/+$/, "");
+  if (!relative || relative === ".") {
+    return root;
+  }
+  const parts = relative.split("/").filter((segment) => segment && segment !== ".");
+  if (!parts.length || parts.some((segment) => segment === "..")) {
+    return root;
+  }
+  const sep = root.includes("\\") ? "\\" : "/";
+  return [root.replace(/[\\/]+$/, ""), ...parts].join(sep);
+}
+
+function getLocalSyncRoot() {
+  return resolveLocalSyncRootInRenderer(state.projectPath, el.localBasePath.value);
 }
 
 function formatProjectAlias(alias) {
@@ -318,7 +357,7 @@ function updateProjectTitle(alias) {
 
 function setProjectPath(projectPath, alias) {
   state.projectPath = projectPath || "";
-  state.localPath = state.projectPath;
+  state.localPath = getLocalSyncRoot() || state.projectPath;
   el.projectPath.textContent = state.projectPath || "-";
   if (alias !== undefined) {
     updateProjectTitle(alias);
@@ -778,10 +817,15 @@ async function applySelectedProject(selected, options) {
         : "";
   setProjectPath(selected.projectPath, alias);
   setFormConfig(selected.config);
+  state.localPath = getLocalSyncRoot() || selected.projectPath;
   if (logMessage) {
     appendLog("info", `${logMessage}: ${selected.projectPath}`);
+    const localRoot = getLocalSyncRoot();
+    if (localRoot && localRoot !== selected.projectPath) {
+      appendLog("info", `本地同步目录: ${localRoot}`);
+    }
   }
-  await refreshLocalDir(selected.projectPath);
+  await refreshLocalDir(getLocalSyncRoot() || selected.projectPath);
 }
 
 function setPanelError(errorEl, message) {
@@ -808,14 +852,181 @@ function showContextMenu(event, item, panel) {
   el.contextSyncFromServer.classList.toggle("hidden", !isLocal);
   el.contextSyncToLocal.classList.toggle("hidden", isLocal);
   el.contextSyncFromLocal.classList.toggle("hidden", isLocal);
+  el.contextDeleteItem.classList.remove("hidden");
 
   el.contextMenu.classList.remove("hidden");
   const menuWidth = el.contextMenu.offsetWidth || 160;
-  const menuHeight = el.contextMenu.offsetHeight || 80;
+  const menuHeight = el.contextMenu.offsetHeight || 100;
   const left = Math.min(event.clientX, window.innerWidth - menuWidth - 8);
   const top = Math.min(event.clientY, window.innerHeight - menuHeight - 8);
   el.contextMenu.style.left = `${Math.max(8, left)}px`;
   el.contextMenu.style.top = `${Math.max(8, top)}px`;
+}
+
+function clearDangerConfirmTimer() {
+  if (state.dangerConfirmTimer) {
+    clearInterval(state.dangerConfirmTimer);
+    state.dangerConfirmTimer = null;
+  }
+}
+
+function closeDangerConfirmDialog(result) {
+  clearDangerConfirmTimer();
+  if (el.dangerConfirmDialog.open) {
+    el.dangerConfirmDialog.close();
+  }
+  const resolver = state.dangerConfirmResolver;
+  state.dangerConfirmResolver = null;
+  if (typeof resolver === "function") {
+    resolver(Boolean(result));
+  }
+}
+
+function openDangerConfirmDialog({ title, message, items, confirmLabel, countdownSeconds }) {
+  return new Promise((resolve) => {
+    clearDangerConfirmTimer();
+    if (state.dangerConfirmResolver) {
+      state.dangerConfirmResolver(false);
+      state.dangerConfirmResolver = null;
+    }
+    state.dangerConfirmResolver = resolve;
+
+    el.dangerConfirmTitle.textContent = title || "确认操作";
+    el.dangerConfirmMessage.textContent = message || "请确认后继续。";
+    el.dangerConfirmList.innerHTML = "";
+    const list = Array.isArray(items) ? items.filter(Boolean) : [];
+    el.dangerConfirmList.classList.toggle("hidden", list.length === 0);
+    list.forEach((item) => {
+      const li = document.createElement("li");
+      li.textContent = item;
+      el.dangerConfirmList.appendChild(li);
+    });
+
+    const seconds = Math.max(0, Number(countdownSeconds) || 0);
+    const baseLabel = confirmLabel || "确认删除";
+    el.btnConfirmDangerConfirm.disabled = seconds > 0;
+    el.btnConfirmDangerConfirm.textContent =
+      seconds > 0 ? `${baseLabel}（${seconds}）` : baseLabel;
+
+    if (!el.dangerConfirmDialog.open) {
+      el.dangerConfirmDialog.showModal();
+    }
+
+    if (seconds <= 0) {
+      return;
+    }
+
+    let remain = seconds;
+    state.dangerConfirmTimer = setInterval(() => {
+      remain -= 1;
+      if (remain <= 0) {
+        clearDangerConfirmTimer();
+        el.btnConfirmDangerConfirm.disabled = false;
+        el.btnConfirmDangerConfirm.textContent = baseLabel;
+        return;
+      }
+      el.btnConfirmDangerConfirm.textContent = `${baseLabel}（${remain}）`;
+    }, 1000);
+  });
+}
+
+function formatOrphanList(orphans) {
+  return (Array.isArray(orphans) ? orphans : []).map((item) => {
+    const relativePath = item.relativePath || item;
+    const type = item.type === "dir" ? "文件夹" : "文件";
+    return `${relativePath}（${type}）`;
+  });
+}
+
+async function confirmAndMaybeDeleteExtras(preview, config) {
+  if (!preview || !preview.ok || !preview.orphans || !preview.orphans.length) {
+    return true;
+  }
+
+  const sideLabel = preview.orphanSide === "remote" ? "服务器" : "本地";
+  const confirmed = await openDangerConfirmDialog({
+    title: `是否删除${sideLabel}多余文件`,
+    message:
+      preview.message ||
+      (preview.orphanSide === "remote"
+        ? "本地没有而服务器有的文件如下，是否删除服务器上的这些文件？"
+        : "服务器没有而本地有的文件如下，是否删除本地这些文件？"),
+    items: formatOrphanList(preview.orphans),
+    confirmLabel: "确认删除",
+    countdownSeconds: 3,
+  });
+
+  if (!confirmed) {
+    appendLog("info", `已跳过删除${sideLabel}多余文件，将仅执行上传/下载。`);
+    return true;
+  }
+
+  const deleteResult = await window.appApi.applySyncExtrasDeletion({
+    projectPath: state.projectPath,
+    config,
+    localPath: preview.localPath,
+    remotePath: preview.remotePath,
+    orphanSide: preview.orphanSide,
+    orphans: preview.orphans,
+  });
+
+  if (!deleteResult || !deleteResult.ok) {
+    appendLog("error", (deleteResult && deleteResult.message) || "删除多余文件失败。");
+    return false;
+  }
+
+  appendLog("info", `已删除 ${deleteResult.deleted || preview.orphans.length} 个${sideLabel}多余项。`);
+  return true;
+}
+
+async function runSyncWithExtrasCheck({
+  direction,
+  item,
+  localPath,
+  remotePath,
+  itemType,
+  syncAction,
+  successMessage,
+}) {
+  if (!state.projectPath) {
+    appendLog("warn", "请先选择项目目录。");
+    return;
+  }
+
+  const config = getFormConfig();
+  if (!config.host || !config.username) {
+    appendLog("warn", "请先完善 FTP 配置。");
+    return;
+  }
+
+  const effectiveType = itemType || (item && item.type) || "file";
+  appendLog("info", "正在检测单边多余文件…");
+  const preview = await window.appApi.previewSyncExtras({
+    projectPath: state.projectPath,
+    config,
+    localPath,
+    remotePath,
+    itemType: effectiveType,
+    direction,
+  });
+
+  if (!preview || !preview.ok) {
+    appendLog("error", (preview && preview.message) || "差异检测失败。");
+    return;
+  }
+
+  const canContinue = await confirmAndMaybeDeleteExtras(preview, config);
+  if (!canContinue) {
+    return;
+  }
+
+  const result = await syncAction(config);
+  if (result && result.ok) {
+    appendLog("info", successMessage);
+    return true;
+  }
+  appendLog("error", (result && result.message) || "同步失败。");
+  return false;
 }
 
 function renderDirList(listEl, items, options) {
@@ -867,9 +1078,11 @@ async function refreshLocalDir(targetPath) {
     return;
   }
 
+  const localRoot = getLocalSyncRoot() || state.projectPath;
   const result = await window.appApi.listLocalDir({
     projectPath: state.projectPath,
-    targetPath: targetPath || state.localPath || state.projectPath,
+    localBasePath: el.localBasePath.value.trim(),
+    targetPath: targetPath || state.localPath || localRoot,
   });
 
   if (!result.ok) {
@@ -934,6 +1147,11 @@ async function saveConfig() {
 
   if (result.ok) {
     appendLog("info", "配置保存成功。");
+    const localRoot = result.localSyncRoot || getLocalSyncRoot() || state.projectPath;
+    if (localRoot && localRoot !== state.projectPath) {
+      appendLog("info", `本地同步目录: ${localRoot}`);
+    }
+    await refreshLocalDir(localRoot);
     return;
   }
   appendLog("error", result.message || "配置保存失败。");
@@ -1068,113 +1286,131 @@ async function syncGitUnstaged() {
 }
 
 async function syncItemFromServer(item) {
-  if (!state.projectPath) {
-    appendLog("warn", "请先选择项目目录。");
-    return;
-  }
-
-  const config = getFormConfig();
-  if (!config.host || !config.username) {
-    appendLog("warn", "请先完善 FTP 配置。");
-    return;
-  }
-
   appendLog("info", `正在与服务器同步: ${item.name}`);
-  const result = await window.appApi.syncServerToLocalByLocal({
-    projectPath: state.projectPath,
-    config,
+  const ok = await runSyncWithExtrasCheck({
+    direction: "remote-to-local",
+    item,
     localPath: item.path,
+    itemType: item.type,
+    successMessage: `与服务器同步完成: ${item.name}`,
+    syncAction: (config) =>
+      window.appApi.syncServerToLocalByLocal({
+        projectPath: state.projectPath,
+        config,
+        localPath: item.path,
+      }),
   });
-
-  if (result.ok) {
-    appendLog("info", `与服务器同步完成: ${item.name}`);
+  if (ok) {
     await refreshLocalDir();
-    return;
   }
-  appendLog("error", result.message || "与服务器同步失败。");
 }
 
 async function syncItemFromLocal(item) {
-  if (!state.projectPath) {
-    appendLog("warn", "请先选择项目目录。");
-    return;
-  }
-
-  const config = getFormConfig();
-  if (!config.host || !config.username) {
-    appendLog("warn", "请先完善 FTP 配置。");
-    return;
-  }
-
   appendLog("info", `正在与本地同步: ${item.name}`);
-  const result = await window.appApi.syncLocalToServerByRemote({
-    projectPath: state.projectPath,
-    config,
+  const ok = await runSyncWithExtrasCheck({
+    direction: "local-to-remote",
+    item,
     remotePath: item.path,
     itemType: item.type,
+    successMessage: `与本地同步完成: ${item.name}`,
+    syncAction: (config) =>
+      window.appApi.syncLocalToServerByRemote({
+        projectPath: state.projectPath,
+        config,
+        remotePath: item.path,
+        itemType: item.type,
+      }),
   });
-
-  if (result.ok) {
-    appendLog("info", `与本地同步完成: ${item.name}`);
+  if (ok) {
     await refreshRemoteDir();
-    return;
   }
-  appendLog("error", result.message || "与本地同步失败。");
 }
 
 async function syncItemToServer(item) {
-  if (!state.projectPath) {
-    appendLog("warn", "请先选择项目目录。");
-    return;
-  }
-
-  const config = getFormConfig();
-  if (!config.host || !config.username) {
-    appendLog("warn", "请先完善 FTP 配置。");
-    return;
-  }
-
   appendLog("info", `正在同步到服务器: ${item.name}`);
-  const result = await window.appApi.syncLocalToRemote({
-    projectPath: state.projectPath,
-    config,
+  const ok = await runSyncWithExtrasCheck({
+    direction: "local-to-remote",
+    item,
     localPath: item.path,
+    itemType: item.type,
+    successMessage: `同步到服务器完成: ${item.name}`,
+    syncAction: (config) =>
+      window.appApi.syncLocalToRemote({
+        projectPath: state.projectPath,
+        config,
+        localPath: item.path,
+      }),
   });
-
-  if (result.ok) {
-    appendLog("info", `同步到服务器完成: ${item.name}`);
+  if (ok) {
     await refreshRemoteDir();
-    return;
   }
-  appendLog("error", result.message || "同步到服务器失败。");
 }
 
 async function syncItemToLocal(item) {
-  if (!state.projectPath) {
-    appendLog("warn", "请先选择项目目录。");
+  appendLog("info", `正在同步到本地: ${item.name}`);
+  const ok = await runSyncWithExtrasCheck({
+    direction: "remote-to-local",
+    item,
+    remotePath: item.path,
+    itemType: item.type,
+    successMessage: `同步到本地完成: ${item.name}`,
+    syncAction: (config) =>
+      window.appApi.syncRemoteToLocal({
+        projectPath: state.projectPath,
+        config,
+        remotePath: item.path,
+        itemType: item.type,
+      }),
+  });
+  if (ok) {
+    await refreshLocalDir();
+  }
+}
+
+async function deleteContextItem(item, panel) {
+  if (!item || !item.path) {
+    return;
+  }
+
+  const isLocal = panel === "local";
+  const confirmed = await openDangerConfirmDialog({
+    title: isLocal ? "删除本地项目" : "删除远程项目",
+    message: `确定删除「${item.name}」吗？删除后不可恢复。`,
+    items: item.type === "dir" ? [`${item.name}/（文件夹，将连同其内容一并删除）`] : [item.name],
+    confirmLabel: "确认删除",
+    countdownSeconds: 3,
+  });
+
+  if (!confirmed) {
     return;
   }
 
   const config = getFormConfig();
-  if (!config.host || !config.username) {
-    appendLog("warn", "请先完善 FTP 配置。");
+  appendLog("info", `正在删除${isLocal ? "本地" : "远程"}: ${item.path}`);
+
+  const result = isLocal
+    ? await window.appApi.deleteLocalPath({
+        projectPath: state.projectPath,
+        config,
+        targetPath: item.path,
+      })
+    : await window.appApi.deleteRemotePath({
+        config,
+        remotePath: item.path,
+        itemType: item.type,
+      });
+
+  if (!result || !result.ok) {
+    appendLog("error", (result && result.message) || "删除失败。");
     return;
   }
 
-  appendLog("info", `正在同步到本地: ${item.name}`);
-  const result = await window.appApi.syncRemoteToLocal({
-    projectPath: state.projectPath,
-    config,
-    remotePath: item.path,
-    itemType: item.type,
-  });
-
-  if (result.ok) {
-    appendLog("info", `同步到本地完成: ${item.name}`);
+  appendLog("info", `已删除: ${item.path}`);
+  if (isLocal) {
     await refreshLocalDir();
-    return;
+  } else {
+    await refreshRemoteDir();
   }
-  appendLog("error", result.message || "同步到本地失败。");
 }
 
 function bindEvents() {
@@ -1192,7 +1428,8 @@ function bindEvents() {
     window.appApi
       .listLocalDir({
         projectPath: state.projectPath,
-        targetPath: state.localPath || state.projectPath,
+        localBasePath: el.localBasePath.value.trim(),
+        targetPath: state.localPath || getLocalSyncRoot() || state.projectPath,
       })
       .then((res) => {
         if (res.ok && res.parentPath) {
@@ -1248,6 +1485,15 @@ function bindEvents() {
       return;
     }
     await syncItemFromLocal(target.item);
+  });
+
+  el.contextDeleteItem.addEventListener("click", async () => {
+    const target = state.contextTarget;
+    hideContextMenu();
+    if (!target || !target.item) {
+      return;
+    }
+    await deleteContextItem(target.item, target.panel);
   });
 
   el.historySetAlias.addEventListener("click", () => {
@@ -1321,6 +1567,36 @@ function bindEvents() {
   });
   el.btnConfirmExtractGitSinceRef.addEventListener("click", () => {
     confirmExtractGitSinceRef();
+  });
+
+  el.btnCloseDangerConfirm.addEventListener("click", () => {
+    closeDangerConfirmDialog(false);
+  });
+  el.btnCancelDangerConfirm.addEventListener("click", () => {
+    closeDangerConfirmDialog(false);
+  });
+  el.btnConfirmDangerConfirm.addEventListener("click", () => {
+    if (el.btnConfirmDangerConfirm.disabled) {
+      return;
+    }
+    closeDangerConfirmDialog(true);
+  });
+  el.dangerConfirmDialog.addEventListener("click", (event) => {
+    if (!el.dangerConfirmDialog.open || event.target !== el.dangerConfirmDialog) {
+      return;
+    }
+    const contentRect = el.dangerConfirmContent.getBoundingClientRect();
+    const inside =
+      event.clientX >= contentRect.left &&
+      event.clientX <= contentRect.right &&
+      event.clientY >= contentRect.top &&
+      event.clientY <= contentRect.bottom;
+    if (!inside) {
+      closeDangerConfirmDialog(false);
+    }
+  });
+  el.dangerConfirmContent.addEventListener("submit", (event) => {
+    event.preventDefault();
   });
   el.projectHistoryDialog.addEventListener("click", (event) => {
     if (!el.projectHistoryDialog.open || event.target !== el.projectHistoryDialog) {

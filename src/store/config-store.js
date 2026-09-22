@@ -14,6 +14,21 @@ function normalizeIgnorePaths(value) {
   return [];
 }
 
+function normalizeLocalBasePath(value) {
+  const text = String(value || "")
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\.\/+/, "")
+    .replace(/\/+$/, "");
+  if (!text || text === ".") {
+    return "";
+  }
+  return text
+    .split("/")
+    .filter((segment) => segment && segment !== ".")
+    .join("/");
+}
+
 function normalizeHistoryOrder(value) {
   if (!Array.isArray(value)) {
     return [];
@@ -123,6 +138,7 @@ class ConfigStore {
       port: Number(stored.port) || 21,
       username: stored.username || "",
       password: stored.password || "",
+      localBasePath: normalizeLocalBasePath(stored.localBasePath),
       remoteBasePath: stored.remoteBasePath || "/",
       ignorePaths: normalizeIgnorePaths(stored.ignorePaths),
       alias: typeof stored.alias === "string" ? stored.alias.trim() : "",
@@ -144,6 +160,11 @@ class ConfigStore {
       port: Number(config.port) || 21,
       username: config.username || "",
       password: config.password || "",
+      localBasePath: normalizeLocalBasePath(
+        config && Object.prototype.hasOwnProperty.call(config, "localBasePath")
+          ? config.localBasePath
+          : existing.localBasePath
+      ),
       remoteBasePath: config.remoteBasePath || "/",
       ignorePaths: normalizeIgnorePaths(config.ignorePaths),
       alias: nextAlias,
@@ -254,4 +275,5 @@ class ConfigStore {
 module.exports = {
   ConfigStore,
   normalizeIgnorePaths,
+  normalizeLocalBasePath,
 };

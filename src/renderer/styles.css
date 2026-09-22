@@ -958,7 +958,19 @@ html[data-debug-log-layout="outline"] .logs {
 
 }
 
+.context-menu-item.context-menu-danger {
 
+  color: #d03050;
+
+}
+
+.context-menu-item.context-menu-danger:hover {
+
+  background: #fff1f0;
+
+  color: #a3223d;
+
+}
 
 .context-menu-item.hidden {
 
@@ -1393,6 +1405,44 @@ html[data-debug-log-layout="outline"] .logs {
   color: #64748b;
 
   font-size: 13px;
+
+}
+
+.danger-confirm-list {
+
+  margin: 10px 0 0;
+
+  padding: 8px 10px;
+
+  max-height: min(240px, 40vh);
+
+  overflow: auto;
+
+  list-style: none;
+
+  border: 1px solid #eceff3;
+
+  border-radius: 8px;
+
+  background: #fafbfc;
+
+}
+
+.danger-confirm-list li {
+
+  padding: 4px 0;
+
+  font-size: 12px;
+
+  color: #334155;
+
+  word-break: break-all;
+
+}
+
+.danger-confirm-list.hidden {
+
+  display: none;
 
 }
 

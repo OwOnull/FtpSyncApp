@@ -614,6 +614,36 @@ function normalizeRelativeUnixPath(relativePath) {
     .replace(/^\.\/+/, "");
 }
 
+function normalizeLocalBasePath(value) {
+  const text = normalizeRelativeUnixPath(value).replace(/\/+$/, "");
+  if (!text || text === ".") {
+    return "";
+  }
+  const parts = text.split("/").filter((segment) => segment && segment !== ".");
+  if (parts.some((segment) => segment === "..")) {
+    throw new Error("本地同步目录不能包含 ..");
+  }
+  return parts.join("/");
+}
+
+/**
+ * 将项目目录 + 相对本地基路径解析为实际同步根目录。
+ * 例如 project=CRMEB-master, localBasePath=crmeb → .../CRMEB-master/crmeb
+ */
+function resolveLocalSyncRoot(projectPath, localBasePath) {
+  const resolvedProjectPath = path.resolve(projectPath);
+  const relative = normalizeLocalBasePath(localBasePath);
+  if (!relative) {
+    return resolvedProjectPath;
+  }
+  const resolved = path.resolve(resolvedProjectPath, ...relative.split("/"));
+  const check = path.relative(resolvedProjectPath, resolved);
+  if (!check || check.startsWith("..") || path.isAbsolute(check)) {
+    throw new Error("本地同步目录必须位于项目目录内。");
+  }
+  return resolved;
+}
+
 function buildProjectLocalPath(projectPath, relativePath) {
   const normalized = normalizeRelativeUnixPath(relativePath);
   if (!normalized) {
@@ -744,6 +774,399 @@ async function ensureRemoteParentDir(client, remotePath) {
   await client.ensureDir(parentDir || "/");
 }
 
+async function walkLocalRelativePaths(rootDir) {
+  const root = path.resolve(rootDir);
+  const result = [];
+
+  async function walk(currentDir, relativeUnix) {
+    let dirents;
+    try {
+      dirents = await fs.readdir(currentDir, { withFileTypes: true });
+    } catch (error) {
+      if (error && error.code === "ENOENT") {
+        return;
+      }
+      throw error;
+    }
+
+    for (const dirent of dirents) {
+      if (!dirent.name || dirent.name === "." || dirent.name === "..") {
+        continue;
+      }
+      const nextRelative = relativeUnix ? `${relativeUnix}/${dirent.name}` : dirent.name;
+      const fullPath = path.join(currentDir, dirent.name);
+      if (dirent.isDirectory()) {
+        result.push({ relativePath: nextRelative, type: "dir" });
+        await walk(fullPath, nextRelative);
+      } else if (dirent.isFile()) {
+        result.push({ relativePath: nextRelative, type: "file" });
+      }
+    }
+  }
+
+  await walk(root, "");
+  return result;
+}
+
+async function walkRemoteRelativePaths(client, remoteRoot) {
+  const root = assertPosixRemotePath(
+    String(remoteRoot || "/").replace(/\\/g, "/"),
+    "远程目录"
+  );
+  const result = [];
+
+  async function walk(currentRemote, relativeUnix) {
+    let list;
+    try {
+      list = await client.list(currentRemote);
+    } catch (error) {
+      const message = String(error && error.message ? error.message : error || "");
+      if (/550|not found|no such file|can't find/i.test(message)) {
+        return;
+      }
+      throw error;
+    }
+
+    for (const item of list) {
+      if (!item || !item.name || item.name === "." || item.name === "..") {
+        continue;
+      }
+      const nextRelative = relativeUnix ? `${relativeUnix}/${item.name}` : item.name;
+      const nextRemote = joinPosixRemotePath(currentRemote, item.name);
+      if (item.isDirectory) {
+        result.push({ relativePath: nextRelative, type: "dir" });
+        await walk(nextRemote, nextRelative);
+      } else {
+        result.push({ relativePath: nextRelative, type: "file" });
+      }
+    }
+  }
+
+  await walk(root, "");
+  return result;
+}
+
+function diffOrphanEntries(sourceEntries, destEntries) {
+  const sourceSet = new Set(
+    (sourceEntries || []).map((item) => normalizeRelativeUnixPath(item.relativePath))
+  );
+  return (destEntries || [])
+    .filter((item) => {
+      const relativePath = normalizeRelativeUnixPath(item.relativePath);
+      return relativePath && !sourceSet.has(relativePath);
+    })
+    .map((item) => ({
+      relativePath: normalizeRelativeUnixPath(item.relativePath),
+      type: item.type === "dir" ? "dir" : "file",
+    }))
+    .sort((a, b) => b.relativePath.length - a.relativePath.length);
+}
+
+async function deleteLocalRelativeEntries(rootDir, entries, onLog) {
+  const log = onLog || (() => {});
+  const root = path.resolve(rootDir);
+  const ordered = [...(entries || [])].sort(
+    (a, b) => String(b.relativePath || "").length - String(a.relativePath || "").length
+  );
+
+  for (const entry of ordered) {
+    const relativePath = normalizeRelativeUnixPath(entry.relativePath);
+    if (!relativePath) {
+      continue;
+    }
+    const fullPath = buildProjectLocalPath(root, relativePath);
+    const relativeCheck = path.relative(root, fullPath);
+    if (!relativeCheck || relativeCheck.startsWith("..") || path.isAbsolute(relativeCheck)) {
+      throw new Error(`删除路径超出本地目录范围: ${relativePath}`);
+    }
+    await fs.rm(fullPath, { recursive: true, force: true });
+    log("info", `已删除本地: ${relativePath}`);
+  }
+}
+
+async function deleteRemoteRelativeEntries(client, remoteRoot, entries, onLog) {
+  const log = onLog || (() => {});
+  const root = assertPosixRemotePath(
+    String(remoteRoot || "/").replace(/\\/g, "/"),
+    "远程目录"
+  );
+  const ordered = [...(entries || [])].sort(
+    (a, b) => String(b.relativePath || "").length - String(a.relativePath || "").length
+  );
+
+  for (const entry of ordered) {
+    const relativePath = normalizeRelativeUnixPath(entry.relativePath);
+    if (!relativePath) {
+      continue;
+    }
+    const remotePath = joinPosixRemotePath(root, relativePath);
+    try {
+      if (entry.type === "dir") {
+        await client.removeDir(remotePath);
+      } else {
+        await client.remove(remotePath);
+      }
+      log("info", `已删除远程: ${relativePath}`);
+    } catch (error) {
+      const message = String(error && error.message ? error.message : error || "");
+      if (/550|not found|no such file/i.test(message)) {
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
+async function localPathExists(localPath) {
+  try {
+    await fs.access(path.resolve(localPath));
+    return true;
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function remotePathExists(client, remotePath) {
+  const normalized = assertPosixRemotePath(
+    String(remotePath || "/").replace(/\\/g, "/"),
+    "远程路径"
+  );
+  try {
+    await client.size(normalized);
+    return true;
+  } catch (error) {
+    const message = String(error && error.message ? error.message : error || "");
+    if (/550|not found|no such file|can't find/i.test(message)) {
+      try {
+        await client.cd(normalized);
+        await client.cd("/");
+        return true;
+      } catch (dirError) {
+        const dirMessage = String(
+          dirError && dirError.message ? dirError.message : dirError || ""
+        );
+        if (/550|not found|no such file|can't find/i.test(dirMessage)) {
+          return false;
+        }
+        throw dirError;
+      }
+    }
+    throw error;
+  }
+}
+
+async function previewSyncExtras({
+  projectPath,
+  config,
+  localPath,
+  remotePath,
+  itemType,
+  direction,
+  onLog,
+}) {
+  const log = onLog || (() => {});
+  const resolvedLocalPath = localPath ? path.resolve(localPath) : "";
+  let normalizedRemotePath = remotePath
+    ? assertPosixRemotePath(String(remotePath).replace(/\\/g, "/"), "远程路径")
+    : "";
+
+  if (direction === "local-to-remote") {
+    let effectiveLocalPath = resolvedLocalPath;
+    if (!effectiveLocalPath) {
+      if (!normalizedRemotePath) {
+        throw new Error("未指定本地或远程路径。");
+      }
+      effectiveLocalPath = remotePathToLocal(
+        projectPath,
+        config.remoteBasePath,
+        normalizedRemotePath
+      );
+    }
+    if (!normalizedRemotePath) {
+      normalizedRemotePath = localPathToRemote(
+        projectPath,
+        config.remoteBasePath,
+        effectiveLocalPath
+      );
+    }
+
+    const effectiveItemType = itemType || "dir";
+    const localExists = await localPathExists(effectiveLocalPath);
+
+    return withFtpClient(config, async (client) => {
+      if (effectiveItemType === "file") {
+        const remoteExists = await remotePathExists(client, normalizedRemotePath);
+        const baseName =
+          normalizeRelativeUnixPath(path.basename(effectiveLocalPath)) ||
+          normalizeRelativeUnixPath(path.posix.basename(normalizedRemotePath));
+        const orphans =
+          !localExists && remoteExists
+            ? [{ relativePath: baseName, type: "file" }]
+            : [];
+        log("info", `差异检测完成：服务器多余 ${orphans.length} 项。`);
+        return {
+          ok: true,
+          comparable: true,
+          orphanSide: "remote",
+          orphans,
+          localPath: effectiveLocalPath,
+          remotePath: normalizedRemotePath,
+          message:
+            orphans.length > 0
+              ? "本地没有而服务器有的文件如下，是否删除服务器上的这些文件？"
+              : "",
+        };
+      }
+
+      const localEntries = localExists
+        ? await walkLocalRelativePaths(effectiveLocalPath)
+        : [];
+      const remoteEntries = await walkRemoteRelativePaths(client, normalizedRemotePath);
+      const orphans = diffOrphanEntries(localEntries, remoteEntries);
+      log("info", `差异检测完成：服务器多余 ${orphans.length} 项。`);
+      return {
+        ok: true,
+        comparable: true,
+        orphanSide: "remote",
+        orphans,
+        localPath: effectiveLocalPath,
+        remotePath: normalizedRemotePath,
+        message:
+          orphans.length > 0
+            ? "本地没有而服务器有的文件如下，是否删除服务器上的这些文件？"
+            : "",
+      };
+    });
+  }
+
+  if (!normalizedRemotePath) {
+    throw new Error("未指定远程路径。");
+  }
+
+  const mappedLocal =
+    resolvedLocalPath ||
+    remotePathToLocal(projectPath, config.remoteBasePath, normalizedRemotePath);
+  const effectiveItemType = itemType || "dir";
+
+  return withFtpClient(config, async (client) => {
+    if (effectiveItemType === "file") {
+      const localExists = await localPathExists(mappedLocal);
+      const remoteExists = await remotePathExists(client, normalizedRemotePath);
+      const baseName =
+        normalizeRelativeUnixPath(path.basename(mappedLocal)) ||
+        normalizeRelativeUnixPath(path.posix.basename(normalizedRemotePath));
+      const orphans =
+        localExists && !remoteExists
+          ? [{ relativePath: baseName, type: "file" }]
+          : [];
+      log("info", `差异检测完成：本地多余 ${orphans.length} 项。`);
+      return {
+        ok: true,
+        comparable: true,
+        orphanSide: "local",
+        orphans,
+        localPath: mappedLocal,
+        remotePath: normalizedRemotePath,
+        message:
+          orphans.length > 0
+            ? "服务器没有而本地有的文件如下，是否删除本地这些文件？"
+            : "",
+      };
+    }
+
+    const remoteEntries = await walkRemoteRelativePaths(client, normalizedRemotePath);
+    const localExists = await localPathExists(mappedLocal);
+    const localEntries = localExists
+      ? await walkLocalRelativePaths(mappedLocal)
+      : [];
+    const orphans = diffOrphanEntries(remoteEntries, localEntries);
+    log("info", `差异检测完成：本地多余 ${orphans.length} 项。`);
+    return {
+      ok: true,
+      comparable: true,
+      orphanSide: "local",
+      orphans,
+      localPath: mappedLocal,
+      remotePath: normalizedRemotePath,
+      message:
+        orphans.length > 0
+          ? "服务器没有而本地有的文件如下，是否删除本地这些文件？"
+          : "",
+    };
+  });
+}
+
+async function applySyncExtrasDeletion({
+  projectPath,
+  config,
+  localPath,
+  remotePath,
+  orphanSide,
+  orphans,
+  onLog,
+}) {
+  const log = onLog || (() => {});
+  const entries = Array.isArray(orphans) ? orphans : [];
+  if (!entries.length) {
+    return { ok: true, deleted: 0 };
+  }
+
+  if (orphanSide === "local") {
+    const targetLocal =
+      localPath ||
+      remotePathToLocal(projectPath, config.remoteBasePath, remotePath);
+    await deleteLocalRelativeEntries(targetLocal, entries, log);
+    return { ok: true, deleted: entries.length };
+  }
+
+  await withFtpClient(config, async (client) => {
+    const targetRemote =
+      remotePath ||
+      localPathToRemote(projectPath, config.remoteBasePath, localPath);
+    await deleteRemoteRelativeEntries(client, targetRemote, entries, log);
+  });
+
+  return { ok: true, deleted: entries.length };
+}
+
+async function deleteLocalPathItem({ projectPath, targetPath, onLog }) {
+  const log = onLog || (() => {});
+  const resolvedProjectPath = path.resolve(projectPath);
+  const resolvedTargetPath = path.resolve(targetPath);
+  const relativePath = path.relative(resolvedProjectPath, resolvedTargetPath);
+  if (!relativePath || relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
+    throw new Error("删除路径超出本地同步目录范围。");
+  }
+  await fs.rm(resolvedTargetPath, { recursive: true, force: true });
+  log("info", `已删除本地: ${resolvedTargetPath}`);
+  return { ok: true };
+}
+
+async function deleteRemotePathItem({ config, remotePath, itemType, onLog }) {
+  const log = onLog || (() => {});
+  const normalizedRemotePath = assertPosixRemotePath(
+    String(remotePath || "").replace(/\\/g, "/"),
+    "远程删除路径"
+  );
+  if (normalizedRemotePath === "/") {
+    throw new Error("禁止删除远程根目录。");
+  }
+
+  await withFtpClient(config, async (client) => {
+    if (itemType === "dir") {
+      await client.removeDir(normalizedRemotePath);
+    } else {
+      await client.remove(normalizedRemotePath);
+    }
+    log("info", `已删除远程: ${normalizedRemotePath}`);
+  });
+
+  return { ok: true };
+}
+
 async function syncLocalToRemote({ projectPath, config, localPath, onLog }) {
   const log = onLog || (() => {});
   const resolvedLocalPath = path.resolve(localPath);
@@ -753,7 +1176,11 @@ async function syncLocalToRemote({ projectPath, config, localPath, onLog }) {
   try {
     stat = await fs.stat(resolvedLocalPath);
   } catch (error) {
-    throw new Error("本地文件或目录不存在。");
+    if (error && error.code === "ENOENT") {
+      log("info", `本地路径不存在，无需上传: ${resolvedLocalPath}`);
+      return;
+    }
+    throw error;
   }
 
   await withFtpClient(config, async (client) => {
@@ -962,9 +1389,15 @@ module.exports = {
   syncServerToLocalByLocalPath,
   syncLocalToServerByRemotePath,
   syncFilesList,
+  previewSyncExtras,
+  applySyncExtrasDeletion,
+  deleteLocalPathItem,
+  deleteRemotePathItem,
   parseIgnorePaths,
   createIgnoreChecker,
   normalizeRelativeUnixPath,
+  normalizeLocalBasePath,
+  resolveLocalSyncRoot,
   buildProjectLocalPath,
   gitOutputToProjectRelative,
   localPathToRemote,

@@ -76,6 +76,12 @@
 
 
 
+                  <label>本地同步目录（相对项目）</label>
+
+                  <input id="localBasePath" type="text" placeholder="例如：/project" />
+
+
+
                   <label>部署路径（远程基路径）</label>
 
                   <input id="remoteBasePath" type="text" placeholder="例如：/www/project" />
@@ -230,6 +236,7 @@
       <button type="button" data-action="sync-from-server" class="context-menu-item">与服务器同步</button>
       <button type="button" data-action="sync-to-local" class="context-menu-item">同步到本地</button>
       <button type="button" data-action="sync-from-local" class="context-menu-item">与本地同步</button>
+      <button type="button" data-action="delete-item" class="context-menu-item context-menu-danger">删除</button>
 
     </div>
 
@@ -301,6 +308,23 @@
         <div class="confirm-dialog-actions">
           <button type="button" id="btnCancelExtractGitSinceRef" class="secondary">取消</button>
           <button type="button" id="btnConfirmExtractGitSinceRef" disabled>确认提取</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="dangerConfirmDialog" class="confirm-dialog project-history-dialog">
+      <form method="dialog" class="confirm-dialog-content project-history-content" id="dangerConfirmContent">
+        <div class="project-history-header">
+          <h3 id="dangerConfirmTitle">确认删除</h3>
+          <button id="btnCloseDangerConfirm" type="button" class="project-history-close" aria-label="关闭弹窗">×</button>
+        </div>
+        <div class="confirm-dialog-body">
+          <p id="dangerConfirmMessage">删除后不可恢复，请确认。</p>
+          <ul id="dangerConfirmList" class="danger-confirm-list hidden"></ul>
+        </div>
+        <div class="confirm-dialog-actions">
+          <button type="button" id="btnCancelDangerConfirm" class="secondary">取消</button>
+          <button type="button" id="btnConfirmDangerConfirm" class="danger" disabled>确认删除</button>
         </div>
       </form>
     </dialog>

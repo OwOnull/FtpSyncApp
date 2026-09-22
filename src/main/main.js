@@ -13,7 +13,12 @@ const {
   syncServerToLocalByLocalPath,
   syncLocalToServerByRemotePath,
   syncFilesList,
+  previewSyncExtras,
+  applySyncExtrasDeletion,
+  deleteLocalPathItem,
+  deleteRemotePathItem,
   normalizeRelativeUnixPath,
+  resolveLocalSyncRoot,
   buildProjectLocalPath,
   gitOutputToProjectRelative,
   setActiveSyncService,
@@ -73,6 +78,37 @@ function getProjectConfigPayload(projectPath) {
     projectPath,
     config: projectConfig,
   };
+}
+
+function resolveProjectLocalSyncRoot(projectPath, config) {
+  const localBasePath =
+    config && Object.prototype.hasOwnProperty.call(config, "localBasePath")
+      ? config.localBasePath
+      : configStore.getProjectConfig(projectPath).localBasePath;
+  return resolveLocalSyncRoot(projectPath, localBasePath);
+}
+
+async function assertLocalSyncRootExists(localSyncRoot) {
+  try {
+    const stat = await fs.stat(localSyncRoot);
+    if (!stat.isDirectory()) {
+      return {
+        ok: false,
+        message: `本地同步目录不是文件夹: ${localSyncRoot}`,
+      };
+    }
+    return { ok: true, localSyncRoot };
+  } catch (error) {
+    return {
+      ok: false,
+      message:
+        error && error.code === "ENOENT"
+          ? `本地同步目录不存在: ${localSyncRoot}`
+          : error && error.message
+            ? error.message
+            : `无法访问本地同步目录: ${localSyncRoot}`,
+    };
+  }
 }
 
 async function stopSyncWithLog() {
@@ -323,12 +359,15 @@ async function listGitExtractOptions(projectPath, limit = GIT_EXTRACT_COMMIT_LIM
   };
 }
 
-async function collectGitUnstagedFileEntries(projectPath) {
+async function collectGitUnstagedFileEntries(projectPath, options = {}) {
   const repo = await resolveGitRepo(projectPath);
   if (!repo.ok) {
     return repo;
   }
 
+  const mapRoot = options.mapRoot
+    ? path.resolve(options.mapRoot)
+    : repo.projectPath;
   const { projectPath: resolvedProjectPath, gitRoot } = repo;
   const gitRootOptions = { gitRoot };
   const unstagedResult = await execGit(["diff", "--name-only"], gitRootOptions);
@@ -367,7 +406,7 @@ async function collectGitUnstagedFileEntries(projectPath) {
 
   const { entries, skippedOutsideProject, appendEntry } = createGitPathMapper(
     gitRoot,
-    resolvedProjectPath
+    mapRoot
   );
 
   for (const relPath of unstagedPaths) {
@@ -393,11 +432,13 @@ async function collectGitUnstagedFileEntries(projectPath) {
     ok: true,
     entries,
     gitRoot,
+    mapRoot,
+    projectPath: resolvedProjectPath,
     skippedOutsideProject,
   };
 }
 
-async function collectGitChangesSinceRef(projectPath, ref) {
+async function collectGitChangesSinceRef(projectPath, ref, options = {}) {
   const normalizedRef = String(ref || "").trim();
   if (!normalizedRef) {
     return {
@@ -407,8 +448,12 @@ async function collectGitChangesSinceRef(projectPath, ref) {
     };
   }
 
+  const mapRoot = options.mapRoot ? path.resolve(options.mapRoot) : null;
+
   if (normalizedRef === GIT_EXTRACT_REF_UNSTAGED) {
-    const collectResult = await collectGitUnstagedFileEntries(projectPath);
+    const collectResult = await collectGitUnstagedFileEntries(projectPath, {
+      mapRoot: mapRoot || undefined,
+    });
     if (!collectResult.ok) {
       return collectResult;
     }
@@ -426,10 +471,11 @@ async function collectGitChangesSinceRef(projectPath, ref) {
   }
 
   const { projectPath: resolvedProjectPath, gitRoot } = repo;
+  const effectiveMapRoot = mapRoot || resolvedProjectPath;
   const gitRootOptions = { gitRoot };
   const { entries, skippedOutsideProject, appendEntry } = createGitPathMapper(
     gitRoot,
-    resolvedProjectPath
+    effectiveMapRoot
   );
 
   if (normalizedRef === GIT_EXTRACT_REF_STAGED) {
@@ -929,16 +975,34 @@ ipcMain.handle("config:save", async (_event, payload) => {
   if (!projectPath) {
     return { ok: false, message: "请先选择项目目录。" };
   }
+  let localSyncRoot;
+  try {
+    localSyncRoot = resolveProjectLocalSyncRoot(projectPath, config || {});
+  } catch (error) {
+    return {
+      ok: false,
+      message: error && error.message ? error.message : "本地同步目录无效。",
+    };
+  }
+  const existsResult = await assertLocalSyncRootExists(localSyncRoot);
+  if (!existsResult.ok) {
+    return existsResult;
+  }
+
   configStore.setProjectConfig(projectPath, config || {});
   configStore.setLastProjectPath(projectPath);
   await configStore.flush();
 
-  if (syncService && path.resolve(syncService.projectPath) === path.resolve(projectPath)) {
+  if (
+    syncService &&
+    activeSyncProjectPath &&
+    path.resolve(activeSyncProjectPath) === path.resolve(projectPath)
+  ) {
     const savedConfig = configStore.getProjectConfig(projectPath);
     syncService.updateIgnorePaths(savedConfig.ignorePaths);
   }
 
-  return { ok: true };
+  return { ok: true, localSyncRoot };
 });
 
 ipcMain.handle("sync:start", async (_event, payload) => {
@@ -967,8 +1031,25 @@ ipcMain.handle("sync:start", async (_event, payload) => {
     ...(config || {}),
   };
 
+  let localSyncRoot;
+  try {
+    localSyncRoot = resolveProjectLocalSyncRoot(projectPath, mergedConfig);
+  } catch (error) {
+    await projectLockManager.release(projectPath);
+    return {
+      ok: false,
+      message: error && error.message ? error.message : "本地同步目录无效。",
+    };
+  }
+
+  const existsResult = await assertLocalSyncRootExists(localSyncRoot);
+  if (!existsResult.ok) {
+    await projectLockManager.release(projectPath);
+    return existsResult;
+  }
+
   syncService = new FtpSyncService({
-    projectPath,
+    projectPath: localSyncRoot,
     config: mergedConfig,
     ignorePaths: mergedConfig.ignorePaths,
     onLog: sendLog,
@@ -978,7 +1059,10 @@ ipcMain.handle("sync:start", async (_event, payload) => {
     await syncService.start();
     setActiveSyncService(syncService);
     activeSyncProjectPath = path.resolve(projectPath);
-    return { ok: true };
+    if (localSyncRoot !== path.resolve(projectPath)) {
+      sendLog("info", `本地同步根目录: ${localSyncRoot}`);
+    }
+    return { ok: true, localSyncRoot };
   } catch (error) {
     clearActiveSyncService(syncService);
     await projectLockManager.release(projectPath);
@@ -1025,16 +1109,31 @@ ipcMain.handle("ftp:force-disconnect", async () => {
 });
 
 ipcMain.handle("list-local-dir", async (_event, payload) => {
-  const { projectPath, targetPath } = payload || {};
+  const { projectPath, targetPath, localBasePath } = payload || {};
   if (!projectPath) {
     return { ok: false, message: "请先选择项目目录。" };
   }
 
-  const resolvedProjectPath = path.resolve(projectPath);
-  const resolvedTargetPath = path.resolve(targetPath || resolvedProjectPath);
-  const relativePath = path.relative(resolvedProjectPath, resolvedTargetPath);
+  let localSyncRoot;
+  try {
+    localSyncRoot = resolveProjectLocalSyncRoot(projectPath, {
+      localBasePath:
+        localBasePath !== undefined
+          ? localBasePath
+          : configStore.getProjectConfig(projectPath).localBasePath,
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      message: error && error.message ? error.message : "本地同步目录无效。",
+    };
+  }
+
+  const resolvedRoot = path.resolve(localSyncRoot);
+  const resolvedTargetPath = path.resolve(targetPath || resolvedRoot);
+  const relativePath = path.relative(resolvedRoot, resolvedTargetPath);
   if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
-    return { ok: false, message: "目录超出当前项目范围。" };
+    return { ok: false, message: "目录超出本地同步目录范围。" };
   }
 
   try {
@@ -1053,14 +1152,13 @@ ipcMain.handle("list-local-dir", async (_event, payload) => {
       });
 
     const parentPath =
-      resolvedTargetPath === resolvedProjectPath
-        ? null
-        : path.dirname(resolvedTargetPath);
+      resolvedTargetPath === resolvedRoot ? null : path.dirname(resolvedTargetPath);
 
     return {
       ok: true,
       path: resolvedTargetPath,
       parentPath,
+      localSyncRoot: resolvedRoot,
       items,
     };
   } catch (error) {
@@ -1094,8 +1192,9 @@ ipcMain.handle("sync-local-to-remote", async (_event, payload) => {
   }
 
   try {
+    const localSyncRoot = resolveProjectLocalSyncRoot(projectPath, config || {});
     await syncLocalToRemote({
-      projectPath,
+      projectPath: localSyncRoot,
       config: config || {},
       localPath,
       onLog: sendLog,
@@ -1119,7 +1218,19 @@ ipcMain.handle("sync:git-unstaged", async (_event, payload) => {
     return { ok: false, message: "请完善 FTP 配置后再同步。" };
   }
 
-  const collectResult = await collectGitUnstagedFileEntries(projectPath);
+  let localSyncRoot;
+  try {
+    localSyncRoot = resolveProjectLocalSyncRoot(projectPath, config);
+  } catch (error) {
+    return {
+      ok: false,
+      message: error && error.message ? error.message : "本地同步目录无效。",
+    };
+  }
+
+  const collectResult = await collectGitUnstagedFileEntries(projectPath, {
+    mapRoot: localSyncRoot,
+  });
   if (!collectResult.ok) {
     return {
       ok: false,
@@ -1131,7 +1242,7 @@ ipcMain.handle("sync:git-unstaged", async (_event, payload) => {
   if (collectResult.skippedOutsideProject && collectResult.skippedOutsideProject.length) {
     sendLog(
       "info",
-      `已跳过 ${collectResult.skippedOutsideProject.length} 个位于 Git 仓库内、但不在当前项目目录下的变更。`
+      `已跳过 ${collectResult.skippedOutsideProject.length} 个位于 Git 仓库内、但不在本地同步目录下的变更。`
     );
   }
 
@@ -1147,7 +1258,12 @@ ipcMain.handle("sync:git-unstaged", async (_event, payload) => {
     };
   }
 
-  if (collectResult.gitRoot && path.resolve(collectResult.gitRoot) !== path.resolve(projectPath)) {
+  if (path.resolve(localSyncRoot) !== path.resolve(projectPath)) {
+    sendLog("info", `Git 变更将按本地同步目录映射: ${localSyncRoot}`);
+  } else if (
+    collectResult.gitRoot &&
+    path.resolve(collectResult.gitRoot) !== path.resolve(projectPath)
+  ) {
     sendLog(
       "info",
       `Git 仓库根目录为 ${collectResult.gitRoot}，已按项目目录 ${path.resolve(projectPath)} 解析相对路径。`
@@ -1156,7 +1272,7 @@ ipcMain.handle("sync:git-unstaged", async (_event, payload) => {
 
   try {
     const result = await syncFilesList({
-      projectPath,
+      projectPath: localSyncRoot,
       config,
       fileEntries: collectResult.entries,
       onLog: sendLog,
@@ -1246,8 +1362,9 @@ ipcMain.handle("sync-remote-to-local", async (_event, payload) => {
   }
 
   try {
+    const localSyncRoot = resolveProjectLocalSyncRoot(projectPath, config || {});
     await syncRemoteToLocal({
-      projectPath,
+      projectPath: localSyncRoot,
       config: config || {},
       remotePath,
       itemType,
@@ -1272,8 +1389,9 @@ ipcMain.handle("sync-server-to-local-by-local", async (_event, payload) => {
   }
 
   try {
+    const localSyncRoot = resolveProjectLocalSyncRoot(projectPath, config || {});
     await syncServerToLocalByLocalPath({
-      projectPath,
+      projectPath: localSyncRoot,
       config: config || {},
       localPath,
       onLog: sendLog,
@@ -1297,8 +1415,9 @@ ipcMain.handle("sync-local-to-server-by-remote", async (_event, payload) => {
   }
 
   try {
+    const localSyncRoot = resolveProjectLocalSyncRoot(projectPath, config || {});
     await syncLocalToServerByRemotePath({
-      projectPath,
+      projectPath: localSyncRoot,
       config: config || {},
       remotePath,
       itemType,
@@ -1309,6 +1428,108 @@ ipcMain.handle("sync-local-to-server-by-remote", async (_event, payload) => {
     return {
       ok: false,
       message: error && error.message ? error.message : "与本地同步失败",
+    };
+  }
+});
+
+ipcMain.handle("sync:preview-extras", async (_event, payload) => {
+  const { projectPath, config, localPath, remotePath, itemType, direction } = payload || {};
+  if (!projectPath) {
+    return { ok: false, message: "请先选择项目目录。" };
+  }
+  if (!direction) {
+    return { ok: false, message: "未指定同步方向。" };
+  }
+
+  try {
+    const localSyncRoot = resolveProjectLocalSyncRoot(projectPath, config || {});
+    const result = await previewSyncExtras({
+      projectPath: localSyncRoot,
+      config: config || {},
+      localPath,
+      remotePath,
+      itemType,
+      direction,
+      onLog: sendLog,
+    });
+    return result;
+  } catch (error) {
+    return {
+      ok: false,
+      message: error && error.message ? error.message : "差异检测失败",
+    };
+  }
+});
+
+ipcMain.handle("sync:apply-extras-deletion", async (_event, payload) => {
+  const { projectPath, config, localPath, remotePath, orphanSide, orphans } = payload || {};
+  if (!projectPath) {
+    return { ok: false, message: "请先选择项目目录。" };
+  }
+
+  try {
+    const localSyncRoot = resolveProjectLocalSyncRoot(projectPath, config || {});
+    const result = await applySyncExtrasDeletion({
+      projectPath: localSyncRoot,
+      config: config || {},
+      localPath,
+      remotePath,
+      orphanSide,
+      orphans,
+      onLog: sendLog,
+    });
+    return result;
+  } catch (error) {
+    return {
+      ok: false,
+      message: error && error.message ? error.message : "删除多余文件失败",
+    };
+  }
+});
+
+ipcMain.handle("delete-local-path", async (_event, payload) => {
+  const { projectPath, config, targetPath } = payload || {};
+  if (!projectPath) {
+    return { ok: false, message: "请先选择项目目录。" };
+  }
+  if (!targetPath) {
+    return { ok: false, message: "未指定要删除的本地路径。" };
+  }
+
+  try {
+    const localSyncRoot = resolveProjectLocalSyncRoot(projectPath, config || {});
+    await deleteLocalPathItem({
+      projectPath: localSyncRoot,
+      targetPath,
+      onLog: sendLog,
+    });
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      message: error && error.message ? error.message : "删除本地文件失败",
+    };
+  }
+});
+
+ipcMain.handle("delete-remote-path", async (_event, payload) => {
+  const { config, remotePath, itemType } = payload || {};
+  if (!remotePath) {
+    return { ok: false, message: "未指定要删除的远程路径。" };
+  }
+
+  try {
+    await deleteRemotePathItem({
+      config: config || {},
+      remotePath,
+      itemType,
+      onLog: sendLog,
+    });
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      message: error && error.message ? error.message : "删除远程文件失败",
     };
   }
 });

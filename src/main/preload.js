@@ -19,6 +19,11 @@ contextBridge.exposeInMainWorld("appApi", {
     ipcRenderer.invoke("sync-server-to-local-by-local", payload),
   syncLocalToServerByRemote: (payload) =>
     ipcRenderer.invoke("sync-local-to-server-by-remote", payload),
+  previewSyncExtras: (payload) => ipcRenderer.invoke("sync:preview-extras", payload),
+  applySyncExtrasDeletion: (payload) =>
+    ipcRenderer.invoke("sync:apply-extras-deletion", payload),
+  deleteLocalPath: (payload) => ipcRenderer.invoke("delete-local-path", payload),
+  deleteRemotePath: (payload) => ipcRenderer.invoke("delete-remote-path", payload),
   syncGitUnstaged: (payload) => ipcRenderer.invoke("sync:git-unstaged", payload),
   listGitExtractOptions: (payload) => ipcRenderer.invoke("extract:git-list-options", payload),
   extractGitSinceRef: (payload) => ipcRenderer.invoke("extract:git-since-ref", payload),
